@@ -29,6 +29,10 @@ type SelectMapMessage = {
   map?: string;
 };
 
+type SelectPaintDurationMessage = {
+  durationMs?: number;
+};
+
 type FireShotMessage = {
   angle?: number;
 };
@@ -86,8 +90,8 @@ export class MyRoom extends Room {
   private readonly countdownDurationMs =
     3_000;
 
-  private readonly paintDurationMs =
-    45_000;
+  private paintDurationMs =
+    120_000;
 
   private readonly huntDurationMs =
     45_000;
@@ -133,6 +137,8 @@ export class MyRoom extends Room {
           this.state.selectedMap,
         activeMap:
           this.state.activeMap,
+        paintDurationMs:
+          this.paintDurationMs,
         players:
           [
             ...this.state.players
@@ -272,6 +278,48 @@ export class MyRoom extends Room {
         requested === "random"
           ? "forest"
           : requested;
+
+      this.clients.forEach(
+        (connectedClient) => {
+          this.sendLobbySnapshot(
+            connectedClient,
+          );
+        },
+      );
+    },
+
+    select_paint_duration: (
+      client: Client,
+      message:
+        SelectPaintDurationMessage,
+    ): void => {
+      this.ensureValidHost();
+
+      if (
+        client.sessionId !==
+          this.state.hostId ||
+        this.state.phase !== "lobby"
+      ) {
+        return;
+      }
+
+      const durationMs =
+        Number(
+          message.durationMs,
+        );
+
+      if (
+        ![
+          90_000,
+          120_000,
+          150_000,
+        ].includes(durationMs)
+      ) {
+        return;
+      }
+
+      this.paintDurationMs =
+        durationMs;
 
       this.clients.forEach(
         (connectedClient) => {

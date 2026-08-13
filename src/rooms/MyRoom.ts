@@ -123,6 +123,17 @@ export class MyRoom extends Room {
   private readonly heatCooldownPerMs = 0.025;
   private readonly overheatDurationMs = 2_500;
 
+  private broadcastPhaseChanged(): void {
+    this.broadcast(
+      "phase_changed",
+      {
+        phase: this.state.phase,
+        phaseEndsAt:
+          this.state.phaseEndsAt,
+      },
+    );
+  }
+
   private sendLobbySnapshot(
     client: Client,
   ): void {
@@ -259,7 +270,7 @@ export class MyRoom extends Room {
 
       const valid =
         requested === "random" ||
-        /^map(?:[1-9]|1[0-2])$/.test(
+        /^map(?:[1-9]|1[01])$/.test(
           requested,
         );
 
@@ -371,7 +382,7 @@ export class MyRoom extends Room {
         this.state.activeMap =
           `map${
             Math.floor(
-              Math.random() * 12,
+              Math.random() * 11,
             ) + 1
           }`;
       } else {
@@ -1264,6 +1275,7 @@ export class MyRoom extends Room {
       this.countdownDurationMs;
 
     this.updateRoomMetadata();
+    this.broadcastPhaseChanged();
 
     this.clock.setTimeout(
       () => {
@@ -1287,6 +1299,7 @@ export class MyRoom extends Room {
       this.paintDurationMs;
 
     this.updateRoomMetadata();
+    this.broadcastPhaseChanged();
 
     this.clock.setTimeout(
       () => {
@@ -1310,6 +1323,7 @@ export class MyRoom extends Room {
       this.huntDurationMs;
 
     this.updateRoomMetadata();
+    this.broadcastPhaseChanged();
 
     this.clock.setTimeout(
       () => {
@@ -1373,6 +1387,7 @@ export class MyRoom extends Room {
     );
 
     this.updateRoomMetadata();
+    this.broadcastPhaseChanged();
 
     this.clock.setTimeout(
       () => {
@@ -1437,6 +1452,7 @@ export class MyRoom extends Room {
     );
 
     this.updateRoomMetadata();
+    this.broadcastPhaseChanged();
   }
 
   private getHunterRoundStats(

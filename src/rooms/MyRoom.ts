@@ -1007,6 +1007,75 @@ export class MyRoom extends Room {
     );
   }
 
+  async onDrop(
+    client: Client,
+    code: number,
+  ): Promise<void> {
+    /*
+     * Colyseus 0.17 distinguishes a temporary network drop from a real
+     * leave when onDrop() is implemented.
+     *
+     * Previously every brief WebSocket interruption went straight through
+     * onLeave(), which removed the player. During an active Paint round,
+     * that made canContinue=false and immediately reset everybody to Lobby.
+     *
+     * Give the same session 10 seconds to reconnect. While this is pending,
+     * DO NOT delete the player and DO NOT abort the round.
+     */
+    console.log(
+      "[Chameleon Hunt] temporary drop",
+      {
+        sessionId:
+          client.sessionId,
+        code,
+      },
+    );
+
+    try {
+      await this.allowReconnection(
+        client,
+        10,
+      );
+    } catch {
+      /*
+       * When reconnection finally fails, Colyseus will treat the client as
+       * permanently gone and onLeave() performs the existing cleanup.
+       */
+    }
+  }
+
+  onReconnect(
+    client: Client,
+  ): void {
+    console.log(
+      "[Chameleon Hunt] reconnected",
+      {
+        sessionId:
+          client.sessionId,
+        phase:
+          this.state.phase,
+      },
+    );
+
+    /*
+     * Immediately resynchronize the recovered client instead of waiting
+     * for another Schema patch.
+     */
+    this.sendLobbySnapshot(
+      client,
+    );
+
+    client.send(
+      "phase_changed",
+      {
+        phase:
+          this.state.phase,
+        phaseEndsAt:
+          this.state.phaseEndsAt,
+      },
+    );
+  }
+
   onLeave(
     client: Client,
     _code: CloseCode,

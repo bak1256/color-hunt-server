@@ -1,0 +1,1682 @@
+import {
+  Client,
+  CloseCode,
+  Room,
+} from "colyseus";
+
+import {
+  MyRoomState,
+  PlayerState,
+} from "./schema/MyRoomState.js";
+
+type JoinOptions = {
+  name?: string;
+  roomTitle?: string;
+  isPrivate?: boolean;
+  password?: string;
+};
+
+type MoveMessage = {
+  x?: number;
+  y?: number;
+};
+
+type HunterVolunteerMessage = {
+  volunteer?: boolean;
+};
+
+type SelectMapMessage = {
+  map?: string;
+};
+
+type FireShotMessage = {
+  angle?: number;
+};
+
+type HunterAimMessage = {
+  angle?: number;
+};
+
+type BrushShape =
+  | "dotCircle"
+  | "circle"
+  | "square";
+
+type PaintPoint = {
+  x: number;
+  y: number;
+};
+
+type PaintStrokeMessage = {
+  targetSessionId?: string;
+  color?: number;
+  size?: number;
+  shape?: BrushShape;
+  points?: PaintPoint[];
+};
+
+type Point = {
+  x: number;
+  y: number;
+};
+
+type WeaponHeatState = {
+  heat: number;
+  updatedAt: number;
+  overheatedUntil: number;
+};
+
+type HunterRoundStats = {
+  reserve: number;
+  precisionPoints: number;
+  shotsFired: number;
+};
+
+type RoundEndReason =
+  | "all_hiders_found"
+  | "timeout"
+  | "ammo_depleted";
+
+export class MyRoom extends Room {
+  maxClients = 10;
+  state = new MyRoomState();
+
+  private roomPassword = "";
+
+  private readonly countdownDurationMs =
+    3_000;
+
+  private readonly paintDurationMs =
+    45_000;
+
+  private readonly huntDurationMs =
+    45_000;
+
+  private readonly resultDurationMs =
+    15_000;
+
+  private readonly shotCooldownMs =
+    450;
+
+  private readonly pelletCount = 7;
+  private readonly pelletRange = 122;
+  private readonly pelletSpread =
+    18 * Math.PI / 180;
+
+  private readonly lastShotAt =
+    new Map<string, number>();
+
+  private readonly weaponHeatStates =
+    new Map<string, WeaponHeatState>();
+
+  private readonly hunterRoundStats =
+    new Map<string, HunterRoundStats>();
+
+  private readonly maxHunterReserve = 12;
+
+
+  private readonly heatPerShot = 34;
+  private readonly heatCooldownPerMs = 0.025;
+  private readonly overheatDurationMs = 2_500;
+
+  private sendLobbySnapshot(
+    client: Client,
+  ): void {
+    this.ensureValidHost();
+
+    client.send(
+      "lobby_snapshot",
+      {
+        hostId:
+          this.state.hostId,
+        selectedMap:
+          this.state.selectedMap,
+        activeMap:
+          this.state.activeMap,
+        players:
+          [
+            ...this.state.players
+              .entries(),
+          ].map(
+            (
+              [
+                sessionId,
+                player,
+              ],
+            ) => ({
+              sessionId,
+              name:
+                player.name,
+              role:
+                player.role,
+              hunterVolunteer:
+                player.hunterVolunteer,
+              x:
+                player.x,
+              y:
+                player.y,
+              alive:
+                player.alive,
+            }),
+          ),
+      },
+    );
+  }
+
+  messages = {
+    request_lobby_snapshot: (
+      client: Client,
+    ): void => {
+      this.sendLobbySnapshot(
+        client,
+      );
+    },
+
+    move: (
+      client: Client,
+      message: MoveMessage,
+    ): void => {
+      const player =
+        this.state.players.get(
+          client.sessionId,
+        );
+
+      if (
+        !player ||
+        !player.alive
+      ) {
+        return;
+      }
+
+      const x = Number(message.x);
+      const y = Number(message.y);
+
+      if (
+        !Number.isFinite(x) ||
+        !Number.isFinite(y)
+      ) {
+        return;
+      }
+
+      player.x = Math.max(
+        0,
+        Math.min(960, x),
+      );
+
+      player.y = Math.max(
+        0,
+        Math.min(540, y),
+      );
+    },
+
+    hunter_volunteer: (
+      client: Client,
+      message: HunterVolunteerMessage,
+    ): void => {
+      if (
+        this.state.phase !== "lobby"
+      ) {
+        return;
+      }
+
+      const player =
+        this.state.players.get(
+          client.sessionId,
+        );
+
+      if (!player) {
+        return;
+      }
+
+      player.hunterVolunteer =
+        Boolean(message.volunteer);
+    },
+
+    select_map: (
+      client: Client,
+      message: SelectMapMessage,
+    ): void => {
+      this.ensureValidHost();
+
+      if (
+        client.sessionId !==
+          this.state.hostId ||
+        this.state.phase !== "lobby"
+      ) {
+        return;
+      }
+
+      const requested =
+        String(
+          message.map ?? "",
+        );
+
+      const valid =
+        requested === "random" ||
+        /^map(?:[1-9]|1[0-2])$/.test(
+          requested,
+        );
+
+      if (!valid) {
+        return;
+      }
+
+      this.state.selectedMap =
+        requested;
+
+      /*
+       * RANDOM 선택 중에는 대기방을 기본 forest 배경으로 유지합니다.
+       * 실제 랜덤 맵은 START GAME을 누르는 순간 확정합니다.
+       */
+      this.state.activeMap =
+        requested === "random"
+          ? "forest"
+          : requested;
+
+      this.clients.forEach(
+        (connectedClient) => {
+          this.sendLobbySnapshot(
+            connectedClient,
+          );
+        },
+      );
+    },
+
+    start_game: (
+      client: Client,
+    ): void => {
+      /*
+       * START GAME 판정 직전에도 hostId를 self-heal합니다.
+       * hostId가 순간적으로 비어 있는 유령방 상태 때문에
+       * 영원히 게임을 시작하지 못하는 상황을 방지합니다.
+       */
+      this.ensureValidHost();
+
+      if (
+        client.sessionId !==
+          this.state.hostId ||
+        this.state.phase !== "lobby"
+      ) {
+        return;
+      }
+
+      if (this.state.players.size < 2) {
+        client.send(
+          "start_game_error",
+          {
+            message:
+              "게임 시작에는 최소 2명이 필요합니다.",
+          },
+        );
+
+        return;
+      }
+
+      /*
+       * 모든 클라이언트가 반드시 동일한 맵을 사용하도록
+       * RANDOM 판정은 서버에서 딱 한 번 수행합니다.
+       */
+      if (
+        this.state.selectedMap ===
+          "random"
+      ) {
+        this.state.activeMap =
+          `map${
+            Math.floor(
+              Math.random() * 12,
+            ) + 1
+          }`;
+      } else {
+        this.state.activeMap =
+          this.state.selectedMap;
+      }
+
+      this.assignRoles();
+
+      if (
+        this.getAliveHiderCount() < 1
+      ) {
+        client.send(
+          "start_game_error",
+          {
+            message:
+              "Hider가 최소 1명 필요합니다.",
+          },
+        );
+        return;
+      }
+
+      this.startCountdownPhase();
+    },
+
+    hunter_aim: (
+      client: Client,
+      message: HunterAimMessage,
+    ): void => {
+      if (
+        this.state.phase !== "hunt"
+      ) {
+        return;
+      }
+
+      const hunter =
+        this.state.players.get(
+          client.sessionId,
+        );
+
+      const angle =
+        Number(message.angle);
+
+      if (
+        !hunter ||
+        hunter.role !== "hunter" ||
+        !hunter.alive ||
+        !Number.isFinite(angle)
+      ) {
+        return;
+      }
+
+      this.broadcast(
+        "hunter_aim",
+        {
+          sessionId:
+            client.sessionId,
+          angle,
+          range:
+            this.pelletRange,
+        },
+      );
+    },
+
+    fire_shot: (
+      client: Client,
+      message: FireShotMessage,
+    ): void => {
+      /*
+       * Hunt 종료시각이 지난 뒤 도착한 총알은 절대 판정하지 않습니다.
+       * phase 전환 timer가 event-loop 지연으로 아직 실행되지 않았더라도
+       * phaseEndsAt이 authoritative deadline입니다.
+       */
+      if (
+        this.state.phase === "hunt" &&
+        this.state.phaseEndsAt > 0 &&
+        Date.now() >=
+          this.state.phaseEndsAt
+      ) {
+        this.finishGame(
+          "hiders",
+        );
+        return;
+      }
+
+      if (
+        this.state.phase !== "hunt"
+      ) {
+        return;
+      }
+
+      const hunter =
+        this.state.players.get(
+          client.sessionId,
+        );
+
+      if (
+        !hunter ||
+        hunter.role !== "hunter" ||
+        !hunter.alive
+      ) {
+        return;
+      }
+
+      const angle = Number(
+        message.angle,
+      );
+
+      if (!Number.isFinite(angle)) {
+        return;
+      }
+
+      const now = Date.now();
+      const previousShot =
+        this.lastShotAt.get(
+          client.sessionId,
+        ) ?? 0;
+
+      if (
+        now - previousShot <
+        this.shotCooldownMs
+      ) {
+        return;
+      }
+
+      const heatState =
+        this.getUpdatedWeaponHeatState(
+          client.sessionId,
+          now,
+        );
+
+      const hunterStats =
+        this.getHunterRoundStats(
+          client.sessionId,
+        );
+
+      if (
+        hunterStats.reserve <= 0
+      ) {
+        this.sendWeaponState(
+          client,
+          heatState,
+          hunterStats,
+        );
+        return;
+      }
+
+      if (
+        now <
+        heatState.overheatedUntil
+      ) {
+        this.sendWeaponState(
+          client,
+          heatState,
+          hunterStats,
+        );
+        return;
+      }
+
+      hunterStats.reserve -= 1;
+      hunterStats.shotsFired += 1;
+
+      heatState.heat = Math.min(
+        100,
+        heatState.heat +
+          this.heatPerShot,
+      );
+
+      if (heatState.heat >= 100) {
+        heatState.overheatedUntil =
+          now +
+          this.overheatDurationMs;
+      }
+
+      heatState.updatedAt = now;
+
+      this.weaponHeatStates.set(
+        client.sessionId,
+        heatState,
+      );
+
+      this.sendWeaponState(
+        client,
+        heatState,
+        hunterStats,
+      );
+
+      this.lastShotAt.set(
+        client.sessionId,
+        now,
+      );
+
+      const startX =
+        hunter.x +
+        Math.cos(angle) * 28;
+
+      const startY =
+        hunter.y +
+        Math.sin(angle) * 28;
+
+      const pellets: Array<{
+        endX: number;
+        endY: number;
+      }> = [];
+
+      const hitIds =
+        new Set<string>();
+
+      for (
+        let index = 0;
+        index < this.pelletCount;
+        index += 1
+      ) {
+        const ratio =
+          this.pelletCount <= 1
+            ? 0.5
+            : index /
+              (this.pelletCount - 1);
+
+        const spreadOffset =
+          -this.pelletSpread / 2 +
+          this.pelletSpread * ratio;
+
+        const pelletAngle =
+          angle + spreadOffset;
+
+        const endX =
+          startX +
+          Math.cos(pelletAngle) *
+            this.pelletRange;
+
+        const endY =
+          startY +
+          Math.sin(pelletAngle) *
+            this.pelletRange;
+
+        pellets.push({
+          endX,
+          endY,
+        });
+
+        for (
+          const [
+            sessionId,
+            target,
+          ] of this.state.players
+        ) {
+          if (
+            target.role !== "hider" ||
+            !target.alive ||
+            hitIds.has(sessionId)
+          ) {
+            continue;
+          }
+
+          const hit =
+            this.distancePointToSegment(
+              target.x,
+              target.y,
+              startX,
+              startY,
+              endX,
+              endY,
+            ) <= 18;
+
+          if (hit) {
+            hitIds.add(sessionId);
+          }
+        }
+      }
+
+      /*
+       * shot 계산 중에 deadline을 넘어간 경우에도 Hider 승리가 우선입니다.
+       */
+      if (
+        this.state.phaseEndsAt > 0 &&
+        Date.now() >=
+          this.state.phaseEndsAt
+      ) {
+        this.finishGame(
+          "hiders",
+        );
+        return;
+      }
+
+      const aliveHidersBeforeShot =
+        this.getAliveHiderCount();
+
+      for (const hitId of hitIds) {
+        const target =
+          this.state.players.get(
+            hitId,
+          );
+
+        if (
+          target &&
+          target.role === "hider" &&
+          target.alive
+        ) {
+          target.alive = false;
+        }
+      }
+
+      const aliveHidersAfterShot =
+        this.getAliveHiderCount();
+
+      /*
+       * 적은 탄약으로 찾을수록 보너스가 큽니다.
+       * 한 발로 여러 Hider를 맞히면 각각 보너스를 받습니다.
+       */
+      const precisionReward =
+        hitIds.size > 0
+          ? hitIds.size *
+            (
+              100 +
+              hunterStats.reserve *
+                25
+            )
+          : 0;
+
+      hunterStats.precisionPoints +=
+        precisionReward;
+
+      this.sendWeaponState(
+        client,
+        heatState,
+        hunterStats,
+      );
+
+      this.broadcast(
+        "shot_fired",
+        {
+          shooterId:
+            client.sessionId,
+          startX,
+          startY,
+          pellets,
+          hitIds:
+            [...hitIds],
+          precisionReward,
+          reserve:
+            hunterStats.reserve,
+          precisionPoints:
+            hunterStats.precisionPoints,
+        },
+      );
+
+      if (
+        hitIds.size > 0 &&
+        aliveHidersBeforeShot > 0 &&
+        aliveHidersAfterShot === 0
+      ) {
+        /*
+         * 마지막 총알로 마지막 Hider를 잡았다면 Hunter 승리가 우선입니다.
+         */
+        this.finishGame(
+          "hunters",
+        );
+        return;
+      }
+
+      /*
+       * 살아 있는 Hider가 남아 있고,
+       * 모든 살아 있는 Hunter의 reserve 합계가 0이면 즉시 Hunter 패배.
+       * 마지막 발의 pellet 판정을 모두 끝낸 뒤 실행하므로
+       * 마지막 탄 역전승도 정상 처리됩니다.
+       */
+      if (
+        aliveHidersAfterShot > 0 &&
+        this.allHuntersOutOfAmmo()
+      ) {
+        this.broadcast(
+          "hunters_out_of_ammo",
+          {
+            message:
+              "헌터의 탄약이 모두 소진되었습니다!",
+          },
+        );
+
+        this.finishGame(
+          "hiders",
+          "ammo_depleted",
+        );
+        return;
+      }
+    },
+
+    paint_stroke: (
+      client: Client,
+      message: PaintStrokeMessage,
+    ): void => {
+      const sender =
+        this.state.players.get(
+          client.sessionId,
+        );
+
+      const targetSessionId =
+        String(
+          message.targetSessionId ??
+            "",
+        );
+
+      const target =
+        this.state.players.get(
+          targetSessionId,
+        );
+
+      if (
+        this.state.phase !== "paint" ||
+        !sender ||
+        targetSessionId !==
+          client.sessionId ||
+        !target
+      ) {
+        return;
+      }
+
+      const color = Number(
+        message.color,
+      );
+
+      const size = Number(
+        message.size,
+      );
+
+      const shape = message.shape;
+
+      if (
+        !Number.isInteger(color) ||
+        color < 0 ||
+        color > 0xffffff ||
+        !Number.isFinite(size) ||
+        size < 1 ||
+        size > 32 ||
+        (
+          shape !== "dotCircle" &&
+          shape !== "circle" &&
+          shape !== "square"
+        ) ||
+        !Array.isArray(message.points)
+      ) {
+        return;
+      }
+
+      const points = message.points
+        .slice(0, 300)
+        .map((point) => ({
+          x: Number(point.x),
+          y: Number(point.y),
+        }))
+        .filter(
+          (point) =>
+            Number.isFinite(point.x) &&
+            Number.isFinite(point.y) &&
+            point.x >= 0 &&
+            point.x <= 80 &&
+            point.y >= 0 &&
+            point.y <= 120,
+        );
+
+      if (points.length === 0) {
+        return;
+      }
+
+      this.broadcast(
+        "paint_stroke",
+        {
+          senderId:
+            client.sessionId,
+          targetSessionId,
+          color,
+          size,
+          shape,
+          points,
+        },
+        {
+          except: client,
+        },
+      );
+    },
+  };
+
+  onCreate(
+    options: JoinOptions,
+  ): void {
+    /*
+     * clock timeout이 어떤 이유로 지연되더라도 phaseEndsAt을 기준으로
+     * 250ms마다 서버가 라운드 진행 상태를 보정합니다.
+     */
+    this.setSimulationInterval(
+      () => {
+        this.checkPhaseDeadline();
+      },
+      50,
+    );
+
+    this.state.phase = "lobby";
+    this.state.phaseEndsAt = 0;
+    this.state.selectedMap = "random";
+    this.state.activeMap = "forest";
+
+    this.state.roomTitle =
+      options.roomTitle
+        ?.trim()
+        .slice(0, 24) ||
+      "Chameleon Room";
+
+    this.state.isPrivate =
+      Boolean(options.isPrivate);
+
+    this.roomPassword =
+      String(options.password ?? "")
+        .slice(0, 32);
+
+    if (this.state.isPrivate) {
+      this.setPrivate(true);
+    }
+
+    this.metadata = {
+      roomTitle:
+        this.state.roomTitle,
+      isPrivate:
+        this.state.isPrivate,
+      playerCount: 0,
+      maxClients:
+        this.maxClients,
+      phase:
+        this.state.phase,
+    };
+  }
+
+  onAuth(
+    _client: Client,
+    options: JoinOptions,
+  ): boolean {
+    if (!this.state.isPrivate) {
+      return true;
+    }
+
+    return (
+      String(options.password ?? "") ===
+      this.roomPassword
+    );
+  }
+
+  onJoin(
+    client: Client,
+    options: JoinOptions,
+  ): void {
+    console.log(
+      "[Chameleon Hunt] onJoin begin",
+      {
+        roomId: this.roomId,
+        sessionId:
+          client.sessionId,
+        existingPlayers:
+          this.state.players.size,
+      },
+    );
+
+    const player =
+      new PlayerState();
+
+    player.name =
+      options.name
+        ?.trim()
+        .slice(0, 16) ||
+      `Player-${
+        client.sessionId.slice(0, 4)
+      }`;
+
+    if (
+      this.state.players.size === 0
+    ) {
+      this.state.hostId =
+        client.sessionId;
+    }
+
+    player.role = "hider";
+    player.hunterVolunteer = false;
+    player.alive = true;
+
+    const lobbyPosition =
+      this.getRandomLobbyPosition();
+
+    player.x = lobbyPosition.x;
+    player.y = lobbyPosition.y;
+
+    this.state.players.set(
+      client.sessionId,
+      player,
+    );
+
+    /*
+     * 최초 생성자뿐 아니라 어떤 이유로 hostId가 비어 있는 경우에도
+     * 현재 서버 state에서 즉시 복구합니다.
+     */
+    this.ensureValidHost();
+
+    this.weaponHeatStates.set(
+      client.sessionId,
+      {
+        heat: 0,
+        updatedAt: Date.now(),
+        overheatedUntil: 0,
+      },
+    );
+
+    this.updateRoomMetadata();
+
+    console.log(
+      "[Chameleon Hunt] onJoin complete",
+      {
+        roomId: this.roomId,
+        sessionId:
+          client.sessionId,
+        hostId:
+          this.state.hostId,
+        players:
+          this.state.players.size,
+      },
+    );
+  }
+
+  onLeave(
+    client: Client,
+    _code: CloseCode,
+  ): void {
+    const leavingPlayer =
+      this.state.players.get(
+        client.sessionId,
+      );
+
+    const leavingName =
+      leavingPlayer?.name ??
+      "Player";
+
+    this.state.players.delete(
+      client.sessionId,
+    );
+
+    this.lastShotAt.delete(
+      client.sessionId,
+    );
+
+    this.weaponHeatStates.delete(
+      client.sessionId,
+    );
+
+    this.hunterRoundStats.delete(
+      client.sessionId,
+    );
+
+    const previousHostId =
+      this.state.hostId;
+
+    if (
+      this.state.hostId ===
+        client.sessionId ||
+      !this.state.players.has(
+        this.state.hostId,
+      )
+    ) {
+      this.ensureValidHost();
+    }
+
+    if (
+      previousHostId !==
+        this.state.hostId &&
+      this.state.hostId
+    ) {
+      /*
+       * Schema patch를 기다리지 않아도 모든 남은 클라이언트가
+       * 새 hostId를 즉시 알 수 있도록 snapshot도 다시 보냅니다.
+       */
+      this.clients.forEach(
+        (remainingClient) => {
+          this.sendLobbySnapshot(
+            remainingClient,
+          );
+        },
+      );
+    }
+
+    this.broadcast(
+      "player_disconnected",
+      {
+        sessionId:
+          client.sessionId,
+        name:
+          leavingName,
+      },
+    );
+
+    const roundIsActive =
+      this.state.phase ===
+        "countdown" ||
+      this.state.phase ===
+        "paint" ||
+      this.state.phase ===
+        "hunt";
+
+    if (roundIsActive) {
+      const players =
+        [...this.state.players.values()];
+
+      const hunterCount =
+        players.filter(
+          (player) =>
+            player.role ===
+            "hunter",
+        ).length;
+
+      const hiderCount =
+        players.filter(
+          (player) =>
+            player.role ===
+            "hider",
+        ).length;
+
+      const canContinue =
+        players.length >= 2 &&
+        hunterCount >= 1 &&
+        hiderCount >= 1;
+
+      if (!canContinue) {
+        this.broadcast(
+          "round_aborted",
+          {
+            message:
+              "플레이어 이탈로 게임을 계속할 수 없어 대기실로 돌아갑니다.",
+          },
+        );
+
+        this.resetToLobby();
+        return;
+      }
+    }
+
+    this.updateRoomMetadata();
+  }
+
+  private assignRoles(): void {
+    const entries =
+      [...this.state.players.entries()];
+
+    const hunterCount =
+      this.getRecommendedHunterCount(
+        entries.length,
+      );
+
+    this.state.hunterCount =
+      hunterCount;
+
+    this.hunterRoundStats.clear();
+
+    for (
+      const [, player] of entries
+    ) {
+      /*
+       * Hider는 대기실에서 보이던 위치를 그대로 게임 시작 위치로 사용합니다.
+       * role 배정 순간 480,270으로 강제 이동시키던 테스트 spawn을 제거합니다.
+       */
+      player.role = "hider";
+      player.alive = true;
+    }
+
+    const volunteers =
+      this.shuffle(
+        entries.filter(
+          ([, player]) =>
+            player.hunterVolunteer,
+        ),
+      );
+
+    const nonVolunteers =
+      this.shuffle(
+        entries.filter(
+          ([, player]) =>
+            !player.hunterVolunteer,
+        ),
+      );
+
+    const selected =
+      volunteers.slice(
+        0,
+        hunterCount,
+      );
+
+    if (
+      selected.length <
+      hunterCount
+    ) {
+      selected.push(
+        ...nonVolunteers.slice(
+          0,
+          hunterCount -
+            selected.length,
+        ),
+      );
+    }
+
+    selected.forEach(
+      ([sessionId, player], index) => {
+        player.role = "hunter";
+        player.alive = true;
+        player.x =
+          80 + index * 55;
+        player.y = 270;
+
+        this.hunterRoundStats.set(
+          sessionId,
+          {
+            reserve:
+              this.maxHunterReserve,
+            precisionPoints: 0,
+            shotsFired: 0,
+          },
+        );
+      },
+    );
+  }
+
+  private getRecommendedHunterCount(
+    playerCount: number,
+  ): number {
+    if (playerCount >= 9) {
+      return 3;
+    }
+
+    if (playerCount >= 5) {
+      return 2;
+    }
+
+    return 1;
+  }
+
+  private checkPhaseDeadline(): void {
+    const phaseEndsAt =
+      this.state.phaseEndsAt;
+
+    if (
+      !phaseEndsAt ||
+      phaseEndsAt <= 0 ||
+      Date.now() < phaseEndsAt
+    ) {
+      return;
+    }
+
+    if (
+      this.state.phase ===
+      "countdown"
+    ) {
+      this.startPaintPhase();
+      return;
+    }
+
+    if (
+      this.state.phase ===
+      "paint"
+    ) {
+      this.startHuntPhase();
+      return;
+    }
+
+    if (
+      this.state.phase ===
+      "hunt"
+    ) {
+      this.finishGame(
+        "hiders",
+      );
+      return;
+    }
+
+    if (
+      this.state.phase ===
+      "finished"
+    ) {
+      this.resetToLobby();
+    }
+  }
+
+  private startCountdownPhase(): void {
+    this.state.phase = "countdown";
+
+
+    this.state.phaseEndsAt =
+      Date.now() +
+      this.countdownDurationMs;
+
+    this.updateRoomMetadata();
+
+    this.clock.setTimeout(
+      () => {
+        if (
+          this.state.phase ===
+          "countdown"
+        ) {
+          this.startPaintPhase();
+        }
+      },
+      this.countdownDurationMs,
+    );
+  }
+
+  private startPaintPhase(): void {
+    this.state.phase = "paint";
+
+
+    this.state.phaseEndsAt =
+      Date.now() +
+      this.paintDurationMs;
+
+    this.updateRoomMetadata();
+
+    this.clock.setTimeout(
+      () => {
+        if (
+          this.state.phase ===
+          "paint"
+        ) {
+          this.startHuntPhase();
+        }
+      },
+      this.paintDurationMs,
+    );
+  }
+
+  private startHuntPhase(): void {
+    this.state.phase = "hunt";
+
+
+    this.state.phaseEndsAt =
+      Date.now() +
+      this.huntDurationMs;
+
+    this.updateRoomMetadata();
+
+    this.clock.setTimeout(
+      () => {
+        if (
+          this.state.phase ===
+          "hunt"
+        ) {
+          this.finishGame(
+            "hiders",
+          );
+        }
+      },
+      this.huntDurationMs,
+    );
+  }
+
+  private finishGame(
+    winner: "hunters" | "hiders",
+    reason: RoundEndReason =
+      winner === "hunters"
+        ? "all_hiders_found"
+        : "timeout",
+  ): void {
+    if (
+      this.state.phase ===
+      "finished"
+    ) {
+      return;
+    }
+
+    this.state.winner = winner;
+    this.state.phase = "finished";
+
+    this.state.phaseEndsAt =
+      Date.now() +
+      this.resultDurationMs;
+
+    const revealedHiders =
+      [...this.state.players.entries()]
+        .filter(
+          ([, player]) =>
+            player.role === "hider",
+        )
+        .map(
+          ([sessionId, player]) => ({
+            sessionId,
+            x: player.x,
+            y: player.y,
+          }),
+        );
+
+    this.broadcast(
+      "round_result",
+      {
+        winner,
+        reason,
+        revealedHiders,
+        durationMs:
+          this.resultDurationMs,
+      },
+    );
+
+    this.updateRoomMetadata();
+
+    this.clock.setTimeout(
+      () => {
+        if (
+          this.state.phase ===
+          "finished"
+        ) {
+          this.resetToLobby();
+        }
+      },
+      this.resultDurationMs,
+    );
+  }
+
+  private resetToLobby(): void {
+    this.state.phase = "lobby";
+    this.state.phaseEndsAt = 0;
+    this.state.hunterCount = 0;
+    this.state.winner = "";
+
+    /*
+     * 선택값은 다음 라운드에도 유지하되,
+     * RANDOM이면 다시 forest 미리보기로 돌아갑니다.
+     */
+    this.state.activeMap =
+      this.state.selectedMap ===
+        "random"
+        ? "forest"
+        : this.state.selectedMap;
+
+    this.hunterRoundStats.clear();
+
+    for (
+      const [
+        sessionId,
+        player,
+      ] of this.state.players
+    ) {
+      player.role = "hider";
+      player.hunterVolunteer = false;
+      player.alive = true;
+
+      const lobbyPosition =
+        this.getRandomLobbyPosition();
+
+      player.x = lobbyPosition.x;
+      player.y = lobbyPosition.y;
+
+      this.weaponHeatStates.set(
+        sessionId,
+        {
+          heat: 0,
+          updatedAt: Date.now(),
+          overheatedUntil: 0,
+        },
+      );
+    }
+
+    this.broadcast(
+      "reset_round",
+      {},
+    );
+
+    this.updateRoomMetadata();
+  }
+
+  private getHunterRoundStats(
+    sessionId: string,
+  ): HunterRoundStats {
+    const existing =
+      this.hunterRoundStats.get(
+        sessionId,
+      );
+
+    if (existing) {
+      return existing;
+    }
+
+    const created: HunterRoundStats = {
+      reserve:
+        this.maxHunterReserve,
+      precisionPoints: 0,
+      shotsFired: 0,
+    };
+
+    this.hunterRoundStats.set(
+      sessionId,
+      created,
+    );
+
+    return created;
+  }
+
+  private sendWeaponState(
+    client: Client,
+    heatState:
+      WeaponHeatState,
+    stats:
+      HunterRoundStats,
+  ): void {
+    client.send(
+      "weapon_state",
+      {
+        ...heatState,
+        reserve:
+          stats.reserve,
+        maxReserve:
+          this.maxHunterReserve,
+        precisionPoints:
+          stats.precisionPoints,
+        shotsFired:
+          stats.shotsFired,
+      },
+    );
+  }
+
+  private getUpdatedWeaponHeatState(
+    sessionId: string,
+    now: number,
+  ): WeaponHeatState {
+    const current =
+      this.weaponHeatStates.get(
+        sessionId,
+      ) ?? {
+        heat: 0,
+        updatedAt: now,
+        overheatedUntil: 0,
+      };
+
+    const elapsed =
+      Math.max(
+        0,
+        now - current.updatedAt,
+      );
+
+    current.heat = Math.max(
+      0,
+      current.heat -
+        elapsed *
+          this.heatCooldownPerMs,
+    );
+
+    current.updatedAt = now;
+
+    if (
+      now >=
+      current.overheatedUntil
+    ) {
+      current.overheatedUntil = 0;
+    }
+
+    return current;
+  }
+
+  private getTotalHunterReserve(): number {
+    let totalReserve = 0;
+
+    for (
+      const [
+        sessionId,
+        player,
+      ] of this.state.players
+    ) {
+      if (
+        player.role !== "hunter" ||
+        !player.alive
+      ) {
+        continue;
+      }
+
+      totalReserve +=
+        this.getHunterRoundStats(
+          sessionId,
+        ).reserve;
+    }
+
+    return totalReserve;
+  }
+
+  private allHuntersOutOfAmmo(): boolean {
+    const hunters =
+      [
+        ...this.state.players.values(),
+      ].filter(
+        (player) =>
+          player.role === "hunter" &&
+          player.alive,
+      );
+
+    return (
+      hunters.length > 0 &&
+      this.getTotalHunterReserve() <= 0
+    );
+  }
+
+  private getAliveHiderCount(): number {
+    return [
+      ...this.state.players.values(),
+    ].filter(
+      (player) =>
+        player.role === "hider" &&
+        player.alive,
+    ).length;
+  }
+
+  private distancePointToSegment(
+    pointX: number,
+    pointY: number,
+    startX: number,
+    startY: number,
+    endX: number,
+    endY: number,
+  ): number {
+    const dx = endX - startX;
+    const dy = endY - startY;
+
+    if (dx === 0 && dy === 0) {
+      return Math.hypot(
+        pointX - startX,
+        pointY - startY,
+      );
+    }
+
+    const t = Math.max(
+      0,
+      Math.min(
+        1,
+        (
+          (pointX - startX) * dx +
+          (pointY - startY) * dy
+        ) /
+        (dx * dx + dy * dy),
+      ),
+    );
+
+    const nearestX =
+      startX + t * dx;
+
+    const nearestY =
+      startY + t * dy;
+
+    return Math.hypot(
+      pointX - nearestX,
+      pointY - nearestY,
+    );
+  }
+
+  private shuffle<T>(
+    values: T[],
+  ): T[] {
+    const copy = [...values];
+
+    for (
+      let index =
+        copy.length - 1;
+      index > 0;
+      index -= 1
+    ) {
+      const randomIndex =
+        Math.floor(
+          Math.random() *
+            (index + 1),
+        );
+
+      [
+        copy[index],
+        copy[randomIndex],
+      ] = [
+        copy[randomIndex],
+        copy[index],
+      ];
+    }
+
+    return copy;
+  }
+
+  private getRandomLobbyPosition(): {
+    x: number;
+    y: number;
+  } {
+    return {
+      x:
+        90 +
+        Math.random() * 560,
+      y:
+        170 +
+        Math.random() * 300,
+    };
+  }
+
+  private ensureValidHost(): void {
+    /*
+     * hostId가 비어 있거나 이미 나간 플레이어를 가리키면
+     * 현재 첫 번째 플레이어를 즉시 방장으로 지정합니다.
+     *
+     * 이 로직은 서버가 authoritative하게 방장 상태를 보장하므로
+     * 클라이언트의 hostId 복제 타이밍에 의존하지 않습니다.
+     */
+    if (
+      this.state.hostId &&
+      this.state.players.has(
+        this.state.hostId,
+      )
+    ) {
+      return;
+    }
+
+    const remainingSessionIds =
+      [
+        ...this.state.players.keys(),
+      ];
+
+    if (
+      remainingSessionIds.length === 0
+    ) {
+      this.state.hostId = "";
+      return;
+    }
+
+    /*
+     * 기존 방장이 나갔을 때 남아 있는 플레이어 중 한 명에게
+     * 방장 권한을 랜덤으로 넘깁니다.
+     */
+    const randomIndex =
+      Math.floor(
+        Math.random() *
+          remainingSessionIds.length,
+      );
+
+    this.state.hostId =
+      remainingSessionIds[
+        randomIndex
+      ];
+  }
+
+  private assignNewHost(): void {
+    this.state.hostId = "";
+    this.ensureValidHost();
+  }
+
+  private updateRoomMetadata(): void {
+    void this.setMetadata({
+      roomTitle:
+        this.state.roomTitle,
+      isPrivate:
+        this.state.isPrivate,
+      playerCount:
+        this.state.players.size,
+      maxClients:
+        this.maxClients,
+      phase:
+        this.state.phase,
+    });
+  }
+}

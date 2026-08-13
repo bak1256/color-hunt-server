@@ -1172,20 +1172,39 @@ export class MyRoom extends Room {
             "hider",
         ).length;
 
-      const canContinue =
-        players.length >= 2 &&
-        hunterCount >= 1 &&
-        hiderCount >= 1;
-
-      if (!canContinue) {
-        this.broadcast(
-          "round_aborted",
-          {
-            message:
-              "플레이어 이탈로 게임을 계속할 수 없어 대기실로 돌아갑니다.",
-          },
+      /*
+       * Active round에서 플레이어 한 명의 이탈/일시적인 연결 문제 때문에
+       * 모든 참가자를 즉시 Lobby로 보내지 않습니다.
+       *
+       * 한 진영이 실제로 0명이 되면 정상적인 finished phase로 종료합니다.
+       * 이렇게 해야 Paint 중 갑자기 대기방으로 튕기는 현상이 발생하지 않고,
+       * 모든 클라이언트가 동일한 phase 전환을 받습니다.
+       */
+      if (
+        hunterCount < 1 &&
+        hiderCount >= 1
+      ) {
+        this.finishGame(
+          "hiders",
         );
+        return;
+      }
 
+      if (
+        hiderCount < 1 &&
+        hunterCount >= 1
+      ) {
+        this.finishGame(
+          "hunters",
+        );
+        return;
+      }
+
+      /*
+       * 방이 완전히 비어버린 경우에만 내부 상태를 Lobby로 정리합니다.
+       * 이 경우 표시할 클라이언트가 없으므로 게임 UI가 튕기는 문제도 없습니다.
+       */
+      if (players.length === 0) {
         this.resetToLobby();
         return;
       }

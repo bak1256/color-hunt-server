@@ -93,8 +93,7 @@ export class MyRoom extends Room {
   private paintDurationMs =
     120_000;
 
-  private readonly huntDurationMs =
-    45_000;
+  private huntDurationMs = 80_000;
 
   private readonly resultDurationMs =
     15_000;
@@ -150,6 +149,7 @@ export class MyRoom extends Room {
           this.state.activeMap,
         paintDurationMs:
           this.paintDurationMs,
+        huntDurationMs: this.huntDurationMs,
         players:
           [
             ...this.state.players
@@ -184,6 +184,46 @@ export class MyRoom extends Room {
     new Map<string, any[]>();
 
   messages = {
+    select_hunt_duration: (
+      client: Client,
+      message: {
+        durationMs?: number;
+      },
+    ): void => {
+      if (
+        this.state.phase !== "lobby" ||
+        client.sessionId !== this.state.hostId
+      ) {
+        return;
+      }
+
+      const durationMs =
+        Number(
+          message?.durationMs,
+        );
+
+      if (
+        ![
+          80_000,
+          100_000,
+          120_000,
+        ].includes(durationMs)
+      ) {
+        return;
+      }
+
+      this.huntDurationMs =
+        durationMs;
+
+      this.clients.forEach(
+        (remainingClient) => {
+          this.sendLobbySnapshot(
+            remainingClient,
+          );
+        },
+      );
+    },
+
     avatar_preset: (
       client: Client,
       message: any,

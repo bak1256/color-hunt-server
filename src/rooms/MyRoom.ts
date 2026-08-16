@@ -1584,6 +1584,47 @@ export class MyRoom extends Room {
       player,
     );
 
+    /* V101085_REJOIN_FULL_STATE_PULSE */
+    if (
+      this.state.phase !== "lobby" &&
+      String(options.clientKey ?? "")
+        .trim()
+    ) {
+      [120, 420, 900].forEach(
+        (delay) => {
+          this.clock.setTimeout(
+            () => {
+              if (
+                !this.state.players.has(
+                  client.sessionId,
+                )
+              ) {
+                return;
+              }
+
+              this.clients.forEach(
+                (connectedClient) => {
+                  this.sendLobbySnapshot(
+                    connectedClient,
+                  );
+
+                  connectedClient.send(
+                    "round_paint_state",
+                    {
+                      strokes:
+                        [...this.roundPaintStrokes.values()]
+                          .flat(),
+                    },
+                  );
+                },
+              );
+            },
+            delay,
+          );
+        },
+      );
+    }
+
     /* V101074_STORE_CLIENT_KEY */
     const stableClientKey =
       String(options.clientKey ?? "")

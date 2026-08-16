@@ -1687,7 +1687,7 @@ export class MyRoom extends Room {
       options.reconnectFallback === true &&
       this.state.phase !== "lobby"
     ) {
-      [900, 1800].forEach(
+      [700, 1600, 3200].forEach(
         (delay) => {
           this.clock.setTimeout(
             () => {
@@ -1699,10 +1699,38 @@ export class MyRoom extends Room {
                 return;
               }
 
+              /* V101089_NORMALIZED_TARGETED_RECONNECT_PAINT */
               const reconnectPaint =
-                this.roundPaintStrokes.get(
-                  client.sessionId,
-                ) ?? [];
+                [...this.roundPaintStrokes.values()]
+                  .flat()
+                  .filter(
+                    (stroke: any) =>
+                      stroke.targetSessionId ===
+                        client.sessionId ||
+                      (
+                        stroke.senderId ===
+                          client.sessionId &&
+                        stroke.senderId ===
+                          stroke.targetSessionId
+                      ),
+                  )
+                  .map(
+                    (stroke: any) => ({
+                      ...stroke,
+                      /*
+                       * This is the replacement Hunter's self-camouflage.
+                       * Opponents must receive the CURRENT sessionId even if
+                       * one stored object escaped an earlier migration.
+                       */
+                      senderId:
+                        stroke.senderId ===
+                          stroke.targetSessionId
+                          ? client.sessionId
+                          : stroke.senderId,
+                      targetSessionId:
+                        client.sessionId,
+                    }),
+                  );
 
               if (
                 reconnectPaint.length <
@@ -1714,6 +1742,8 @@ export class MyRoom extends Room {
               this.broadcast(
                 "reconnected_player_paint",
                 {
+                  sessionId:
+                    client.sessionId,
                   strokes:
                     reconnectPaint,
                 },

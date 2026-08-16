@@ -1644,6 +1644,18 @@ export class MyRoom extends Room {
 
     this.updateRoomMetadata();
     this.broadcastPhaseChanged();
+    /* V101068_REDUNDANT_startPaintPhase */
+    this.clock.setTimeout(
+      () => {
+        if (
+          this.state.phase ===
+          "paint"
+        ) {
+          this.broadcastPhaseChanged();
+        }
+      },
+      180,
+    );
 
     this.clock.setTimeout(
       () => {
@@ -1745,6 +1757,18 @@ export class MyRoom extends Room {
 
     this.updateRoomMetadata();
     this.broadcastPhaseChanged();
+    /* V101068_REDUNDANT_startHuntPhase */
+    this.clock.setTimeout(
+      () => {
+        if (
+          this.state.phase ===
+          "hunt"
+        ) {
+          this.broadcastPhaseChanged();
+        }
+      },
+      180,
+    );
 
     this.clock.setTimeout(
       () => {

@@ -1518,27 +1518,33 @@ export class MyRoom extends Room {
       this.sendPaintReadyState(client);
     }
 
-    /* V101076_RECONNECT_STATE_PULSE */
-    this.clock.setTimeout(
-      () => {
-        if (
-          this.clients.includes(client)
-        ) {
-          this.sendLobbySnapshot(
-            client,
-          );
+    /* V101077_RECONNECT_MULTI_PULSE */
+    [80, 220, 650].forEach(
+      (delay) => {
+        this.clock.setTimeout(
+          () => {
+            if (
+              this.clients.includes(
+                client,
+              )
+            ) {
+              this.sendLobbySnapshot(
+                client,
+              );
 
-          if (
-            this.state.phase ===
-              "paint"
-          ) {
-            this.sendPaintReadyState(
-              client,
-            );
-          }
-        }
+              if (
+                this.state.phase ===
+                  "paint"
+              ) {
+                this.sendPaintReadyState(
+                  client,
+                );
+              }
+            }
+          },
+          delay,
+        );
       },
-      180,
     );
   }
 

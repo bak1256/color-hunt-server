@@ -115,6 +115,9 @@ export class MyRoom extends Room {
   private readonly hunterRoundStats =
     new Map<string, HunterRoundStats>();
 
+  private readonly paintReadySessionIds =
+    new Set<string>();
+
   private readonly maxHunterReserve = 12;
 
 
@@ -967,6 +970,24 @@ export class MyRoom extends Room {
       }
     },
 
+    paint_ready: (
+      client: Client,
+    ): void => {
+      if (this.state.phase !== "paint") return;
+
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.role !== "hider" || !player.alive) return;
+
+      this.paintReadySessionIds.add(client.sessionId);
+      this.broadcastPaintReadyState();
+    },
+
+    request_paint_ready_state: (
+      client: Client,
+    ): void => {
+      this.sendPaintReadyState(client);
+    },
+
     paint_stroke: (
       client: Client,
       message: PaintStrokeMessage,
@@ -1301,6 +1322,12 @@ export class MyRoom extends Room {
     this.hunterRoundStats.delete(
       client.sessionId,
     );
+
+    /* V101069_READY_LEAVE_CLEANUP */
+    this.paintReadySessionIds.delete(client.sessionId);
+    if (this.state.phase === "paint") {
+      this.broadcastPaintReadyState();
+    }
 
     const previousHostId =
       this.state.hostId;
@@ -1642,8 +1669,12 @@ export class MyRoom extends Room {
       Date.now() +
       this.paintDurationMs;
 
+    /* V101069_READY_PAINT_START */
+    this.paintReadySessionIds.clear();
+
     this.updateRoomMetadata();
     this.broadcastPhaseChanged();
+    this.broadcastPaintReadyState();
     /* V101068_REDUNDANT_startPaintPhase */
     this.clock.setTimeout(
       () => {
@@ -1852,6 +1883,8 @@ export class MyRoom extends Room {
     this.state.phaseEndsAt = 0;
     this.state.hunterCount = 0;
     this.state.winner = "";
+    /* V101069_READY_RESET */
+    this.paintReadySessionIds.clear();
 
     /*
      * 선택값은 다음 라운드에도 유지하되,
@@ -1898,6 +1931,41 @@ export class MyRoom extends Room {
 
     this.updateRoomMetadata();
     this.broadcastPhaseChanged();
+  }
+
+  private getPaintReadyState(): {
+    ready: number;
+    total: number;
+    readySessionIds: string[];
+  } {
+    const activeHiderIds = [...this.state.players.entries()]
+      .filter(([, player]) => player.role === "hider" && player.alive)
+      .map(([sessionId]) => sessionId);
+
+    const activeHiderSet = new Set(activeHiderIds);
+    for (const sessionId of this.paintReadySessionIds) {
+      if (!activeHiderSet.has(sessionId)) {
+        this.paintReadySessionIds.delete(sessionId);
+      }
+    }
+
+    const readySessionIds = activeHiderIds.filter((sessionId) =>
+      this.paintReadySessionIds.has(sessionId),
+    );
+
+    return {
+      ready: readySessionIds.length,
+      total: activeHiderIds.length,
+      readySessionIds,
+    };
+  }
+
+  private sendPaintReadyState(client: Client): void {
+    client.send("paint_ready_state", this.getPaintReadyState());
+  }
+
+  private broadcastPaintReadyState(): void {
+    this.broadcast("paint_ready_state", this.getPaintReadyState());
   }
 
   private getHunterRoundStats(

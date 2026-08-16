@@ -1421,6 +1421,7 @@ export class MyRoom extends Room {
             existingSessionId,
           );
 
+          /* V101087_RECONNECT_PAINT_THROTTLED */
           /* V101086_GLOBAL_PAINT_SESSION_REMAP */
           const remappedRoundPaint =
             new Map<string, any[]>();
@@ -1483,7 +1484,7 @@ export class MyRoom extends Room {
             );
           }
 
-          [180, 520, 1100].forEach(
+          [650].forEach(
             (delay) => {
               this.clock.setTimeout(
                 () => {
@@ -1686,7 +1687,7 @@ export class MyRoom extends Room {
       String(options.clientKey ?? "")
         .trim()
     ) {
-      [120, 420, 900].forEach(
+      [650].forEach(
         (delay) => {
           this.clock.setTimeout(
             () => {

@@ -1682,9 +1682,111 @@ export class MyRoom extends Room {
       player,
     );
 
-    /* V101088_TARGETED_RECONNECT_PAINT */
+    /* V101090_SAFE_EXISTING_PAINT_STROKE_REPLAY */
     if (
       options.reconnectFallback === true &&
+      this.state.phase !== "lobby"
+    ) {
+      this.clock.setTimeout(
+        () => {
+          if (
+            !this.state.players.has(
+              client.sessionId,
+            )
+          ) {
+            return;
+          }
+
+          const reconnectPaint =
+            (
+              this.roundPaintStrokes.get(
+                client.sessionId,
+              ) ?? []
+            ).map(
+              (stroke: any) => ({
+                ...stroke,
+                senderId:
+                  stroke.senderId ===
+                    stroke.targetSessionId
+                    ? client.sessionId
+                    : stroke.senderId,
+                targetSessionId:
+                  client.sessionId,
+              }),
+            );
+
+          if (
+            reconnectPaint.length <
+            1
+          ) {
+            return;
+          }
+
+          let cursor = 0;
+
+          const sendBatch =
+            (): void => {
+              if (
+                !this.state.players.has(
+                  client.sessionId,
+                )
+              ) {
+                return;
+              }
+
+              const end =
+                Math.min(
+                  reconnectPaint.length,
+                  cursor + 12,
+                );
+
+              for (
+                ;
+                cursor < end;
+                cursor += 1
+              ) {
+                const stroke =
+                  reconnectPaint[cursor];
+
+                this.broadcast(
+                  "paint_stroke",
+                  {
+                    senderId:
+                      stroke.senderId,
+                    targetSessionId:
+                      client.sessionId,
+                    color:
+                      stroke.color,
+                    size:
+                      stroke.size,
+                    shape:
+                      stroke.shape,
+                    points:
+                      stroke.points,
+                  },
+                );
+              }
+
+              if (
+                cursor <
+                reconnectPaint.length
+              ) {
+                this.clock.setTimeout(
+                  sendBatch,
+                  70,
+                );
+              }
+            };
+
+          sendBatch();
+        },
+        1200,
+      );
+    }
+
+    /* V101088_TARGETED_RECONNECT_PAINT */
+    if (
+      false &&
       this.state.phase !== "lobby"
     ) {
       [700, 1600, 3200].forEach(
@@ -1698,57 +1800,7 @@ export class MyRoom extends Room {
               ) {
                 return;
               }
-
-              /* V101089_NORMALIZED_TARGETED_RECONNECT_PAINT */
-              const reconnectPaint =
-                [...this.roundPaintStrokes.values()]
-                  .flat()
-                  .filter(
-                    (stroke: any) =>
-                      stroke.targetSessionId ===
-                        client.sessionId ||
-                      (
-                        stroke.senderId ===
-                          client.sessionId &&
-                        stroke.senderId ===
-                          stroke.targetSessionId
-                      ),
-                  )
-                  .map(
-                    (stroke: any) => ({
-                      ...stroke,
-                      /*
-                       * This is the replacement Hunter's self-camouflage.
-                       * Opponents must receive the CURRENT sessionId even if
-                       * one stored object escaped an earlier migration.
-                       */
-                      senderId:
-                        stroke.senderId ===
-                          stroke.targetSessionId
-                          ? client.sessionId
-                          : stroke.senderId,
-                      targetSessionId:
-                        client.sessionId,
-                    }),
-                  );
-
-              if (
-                reconnectPaint.length <
-                1
-              ) {
-                return;
-              }
-
-              this.broadcast(
-                "reconnected_player_paint",
-                {
-                  sessionId:
-                    client.sessionId,
-                  strokes:
-                    reconnectPaint,
-                },
-              );
-            },
+},
             delay,
           );
         },

@@ -1421,6 +1421,102 @@ export class MyRoom extends Room {
             existingSessionId,
           );
 
+          /* V101086_GLOBAL_PAINT_SESSION_REMAP */
+          const remappedRoundPaint =
+            new Map<string, any[]>();
+
+          for (
+            const [
+              paintTargetId,
+              paintStrokes,
+            ] of this.roundPaintStrokes
+          ) {
+            const remappedTargetId =
+              paintTargetId ===
+                existingSessionId
+                ? client.sessionId
+                : paintTargetId;
+
+            const remappedStrokes =
+              paintStrokes.map(
+                (stroke: any) => ({
+                  ...stroke,
+                  senderId:
+                    stroke.senderId ===
+                      existingSessionId
+                      ? client.sessionId
+                      : stroke.senderId,
+                  targetSessionId:
+                    stroke.targetSessionId ===
+                      existingSessionId
+                      ? client.sessionId
+                      : stroke.targetSessionId,
+                }),
+              );
+
+            const previous =
+              remappedRoundPaint.get(
+                remappedTargetId,
+              ) ?? [];
+
+            previous.push(
+              ...remappedStrokes,
+            );
+
+            remappedRoundPaint.set(
+              remappedTargetId,
+              previous,
+            );
+          }
+
+          this.roundPaintStrokes.clear();
+
+          for (
+            const [
+              paintTargetId,
+              paintStrokes,
+            ] of remappedRoundPaint
+          ) {
+            this.roundPaintStrokes.set(
+              paintTargetId,
+              paintStrokes,
+            );
+          }
+
+          [180, 520, 1100].forEach(
+            (delay) => {
+              this.clock.setTimeout(
+                () => {
+                  if (
+                    !this.state.players.has(
+                      client.sessionId,
+                    )
+                  ) {
+                    return;
+                  }
+
+                  this.clients.forEach(
+                    (connectedClient) => {
+                      this.sendLobbySnapshot(
+                        connectedClient,
+                      );
+
+                      connectedClient.send(
+                        "round_paint_state",
+                        {
+                          strokes:
+                            [...this.roundPaintStrokes.values()]
+                              .flat(),
+                        },
+                      );
+                    },
+                  );
+                },
+                delay,
+              );
+            },
+          );
+
           /* V101082B_TRANSFER_PAINT_STATE */
           const oldAvatar =
             this.lobbyAvatarPresets.get(

@@ -1466,6 +1466,30 @@ export class MyRoom extends Room {
             this.roundPaintStrokes.delete(
               existingSessionId,
             );
+
+            /* V101084_REJOIN_PAINT_BROADCAST */
+            this.clock.setTimeout(
+              () => {
+                const active =
+                  this.state.phase === "paint" ||
+                  this.state.phase === "hunt" ||
+                  this.state.phase === "countdown";
+
+                if (!active) {
+                  return;
+                }
+
+                this.broadcast(
+                  "round_paint_state",
+                  {
+                    strokes:
+                      [...this.roundPaintStrokes.values()]
+                        .flat(),
+                  },
+                );
+              },
+              80,
+            );
           }
           this.clientKeyBySessionId.delete(
             existingSessionId,

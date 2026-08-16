@@ -1517,6 +1517,29 @@ export class MyRoom extends Room {
     if (this.state.phase === "paint") {
       this.sendPaintReadyState(client);
     }
+
+    /* V101076_RECONNECT_STATE_PULSE */
+    this.clock.setTimeout(
+      () => {
+        if (
+          this.clients.includes(client)
+        ) {
+          this.sendLobbySnapshot(
+            client,
+          );
+
+          if (
+            this.state.phase ===
+              "paint"
+          ) {
+            this.sendPaintReadyState(
+              client,
+            );
+          }
+        }
+      },
+      180,
+    );
   }
 
   onLeave(

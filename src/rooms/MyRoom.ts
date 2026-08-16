@@ -120,6 +120,8 @@ export class MyRoom extends Room {
   private readonly paintReadySessionIds =
     new Set<string>();
 
+  private lastPaintReadyPulseAt = 0;
+
   private readonly maxHunterReserve = 12;
 
 
@@ -156,6 +158,15 @@ export class MyRoom extends Room {
         paintDurationMs:
           this.paintDurationMs,
         huntDurationMs: this.huntDurationMs,
+        /* V101072_PHASE_RECOVERY_SNAPSHOT */
+        phase:
+          this.state.phase,
+        phaseEndsAt:
+          this.state.phaseEndsAt,
+        serverNow:
+          Date.now(),
+        paintReadyState:
+          this.getPaintReadyState(),
         players:
           [
             ...this.state.players
@@ -1067,6 +1078,8 @@ export class MyRoom extends Room {
     request_paint_ready_state: (
       client: Client,
     ): void => {
+      /* V101072_READY_REQUEST_PHASE_RECOVERY */
+      this.sendLobbySnapshot(client);
       this.sendPaintReadyState(client);
     },
 
@@ -1175,6 +1188,18 @@ export class MyRoom extends Room {
     this.setSimulationInterval(
       () => {
         this.checkPhaseDeadline();
+
+        /* V101072_READY_PERIODIC_PULSE */
+        if (
+          this.state.phase === "paint" &&
+          Date.now() -
+            this.lastPaintReadyPulseAt >=
+            500
+        ) {
+          this.lastPaintReadyPulseAt =
+            Date.now();
+          this.broadcastPaintReadyState();
+        }
       },
       50,
     );
@@ -1875,6 +1900,29 @@ export class MyRoom extends Room {
 
     this.updateRoomMetadata();
     this.broadcastPhaseChanged();
+
+    /* V101072_HUNT_RECOVERY_PULSE */
+    [120, 450].forEach(
+      (delay) => {
+        this.clock.setTimeout(
+          () => {
+            if (
+              this.state.phase === "hunt"
+            ) {
+              this.clients.forEach(
+                (connectedClient) => {
+                  this.sendLobbySnapshot(
+                    connectedClient,
+                  );
+                },
+              );
+            }
+          },
+          delay,
+        );
+      },
+    );
+
     /* V101068_REDUNDANT_startHuntPhase */
     this.clock.setTimeout(
       () => {

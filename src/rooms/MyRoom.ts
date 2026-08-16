@@ -219,6 +219,9 @@ export class MyRoom extends Room {
   private readonly lobbyAvatarPresets =
     new Map<string, any[]>();
 
+  private readonly roundPaintStrokes =
+    new Map<string, any[]>();
+
   messages = {
     select_hunt_duration: (
       client: Client,
@@ -409,6 +412,26 @@ export class MyRoom extends Room {
                 strokes,
               }),
             ),
+        },
+      );
+    },
+
+    request_round_paint_state: (
+      client: Client,
+    ): void => {
+      const active =
+        this.state.phase === "paint" ||
+        this.state.phase === "hunt" ||
+        this.state.phase === "countdown";
+
+      client.send(
+        "round_paint_state",
+        {
+          strokes:
+            active
+              ? [...this.roundPaintStrokes.values()]
+                  .flat()
+              : [],
         },
       );
     },
@@ -1179,6 +1202,42 @@ export class MyRoom extends Room {
         return;
       }
 
+      /* V101082B_STORE_ROUND_PAINT */
+      const storedStroke = {
+        senderId:
+          client.sessionId,
+        targetSessionId,
+        color,
+        size,
+        shape,
+        points,
+      };
+
+      const targetHistory =
+        this.roundPaintStrokes.get(
+          targetSessionId,
+        ) ?? [];
+
+      targetHistory.push(
+        storedStroke,
+      );
+
+      if (
+        targetHistory.length >
+        500
+      ) {
+        targetHistory.splice(
+          0,
+          targetHistory.length -
+            500,
+        );
+      }
+
+      this.roundPaintStrokes.set(
+        targetSessionId,
+        targetHistory,
+      );
+
       this.broadcast(
         "paint_stroke",
         {
@@ -1361,6 +1420,53 @@ export class MyRoom extends Room {
           this.paintReadySessionIds.delete(
             existingSessionId,
           );
+
+          /* V101082B_TRANSFER_PAINT_STATE */
+          const oldAvatar =
+            this.lobbyAvatarPresets.get(
+              existingSessionId,
+            );
+
+          if (oldAvatar) {
+            this.lobbyAvatarPresets.set(
+              client.sessionId,
+              oldAvatar,
+            );
+
+            this.lobbyAvatarPresets.delete(
+              existingSessionId,
+            );
+          }
+
+          const oldRoundPaint =
+            this.roundPaintStrokes.get(
+              existingSessionId,
+            );
+
+          if (oldRoundPaint) {
+            const transferred =
+              oldRoundPaint.map(
+                (stroke: any) => ({
+                  ...stroke,
+                  senderId:
+                    stroke.senderId ===
+                      existingSessionId
+                      ? client.sessionId
+                      : stroke.senderId,
+                  targetSessionId:
+                    client.sessionId,
+                }),
+              );
+
+            this.roundPaintStrokes.set(
+              client.sessionId,
+              transferred,
+            );
+
+            this.roundPaintStrokes.delete(
+              existingSessionId,
+            );
+          }
           this.clientKeyBySessionId.delete(
             existingSessionId,
           );
@@ -1628,6 +1734,34 @@ export class MyRoom extends Room {
         phaseEndsAt:
           this.state.phaseEndsAt,
         serverNow: Date.now(),
+      },
+    );
+
+    /* V101082B_RECONNECT_PAINT_REPLAY */
+    client.send(
+      "round_paint_state",
+      {
+        strokes:
+          this.state.phase === "paint" ||
+          this.state.phase === "hunt" ||
+          this.state.phase === "countdown"
+            ? [...this.roundPaintStrokes.values()]
+                .flat()
+            : [],
+      },
+    );
+
+    client.send(
+      "avatar_presets",
+      {
+        presets:
+          [...this.lobbyAvatarPresets.entries()]
+            .map(
+              ([sessionId, strokes]) => ({
+                sessionId,
+                strokes,
+              }),
+            ),
       },
     );
 
@@ -2103,6 +2237,9 @@ export class MyRoom extends Room {
       this.paintDurationMs;
 
     /* V101069_READY_PAINT_START */
+    /* V101082B_CLEAR_ROUND_PAINT */
+    this.roundPaintStrokes.clear();
+
     this.paintReadySessionIds.clear();
 
     this.updateRoomMetadata();

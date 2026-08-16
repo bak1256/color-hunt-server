@@ -1601,6 +1601,39 @@ export class MyRoom extends Room {
   }
 
   private startPaintPhase(): void {
+    /*
+     * PHASE_DEADLINE_GUARD_COUNTDOWN
+     *
+     * Never enter Paint unless the authoritative Countdown really ended.
+     * Stale callbacks from a previous round are ignored.
+     */
+    if (
+      this.state.phase !==
+      "countdown"
+    ) {
+      return;
+    }
+
+    const countdownRemainingMs =
+      this.state.phaseEndsAt -
+      Date.now();
+
+    if (
+      Number.isFinite(
+        countdownRemainingMs,
+      ) &&
+      countdownRemainingMs > 25
+    ) {
+      this.clock.setTimeout(
+        () => {
+          this.startPaintPhase();
+        },
+        countdownRemainingMs,
+      );
+
+      return;
+    }
+
     this.state.phase = "paint";
 
 
@@ -1625,6 +1658,83 @@ export class MyRoom extends Room {
   }
 
   private startHuntPhase(): void {
+    /*
+     * PHASE_DEADLINE_GUARD_PAINT
+     *
+     * This is the final authority for Paint -> Hunt.
+     *
+     * Even if an old/duplicate Colyseus timer fires early, Hunt can NEVER
+     * begin while the server's authoritative Paint deadline is still in
+     * the future.
+     */
+    if (
+      this.state.phase !==
+      "paint"
+    ) {
+      return;
+    }
+
+    const paintRemainingMs =
+      this.state.phaseEndsAt -
+      Date.now();
+
+    if (
+      Number.isFinite(
+        paintRemainingMs,
+      ) &&
+      paintRemainingMs > 25
+    ) {
+      /*
+       * Do not trust the early callback. Re-arm exactly for the remaining
+       * authoritative duration. If several stale callbacks arrive, every
+       * one of them hits this same guard; once the first valid transition
+       * changes phase to Hunt, all later callbacks return above.
+       */
+      this.clock.setTimeout(
+        () => {
+          this.startHuntPhase();
+        },
+        paintRemainingMs,
+      );
+
+      return;
+    }
+
+    /*
+     * Corrupted/empty deadlines are also unsafe. Paint may only finish from
+     * a real deadline set by the current Paint phase.
+     */
+    if (
+      !Number.isFinite(
+        this.state.phaseEndsAt,
+      ) ||
+      this.state.phaseEndsAt <= 0
+    ) {
+      console.warn(
+        "[Color Hunt] blocked Hunt transition: invalid Paint deadline",
+        {
+          phase:
+            this.state.phase,
+          phaseEndsAt:
+            this.state.phaseEndsAt,
+        },
+      );
+
+      return;
+    }
+
+    console.log(
+      "[Color Hunt] Paint deadline reached -> Hunt",
+      {
+        now: Date.now(),
+        phaseEndsAt:
+          this.state.phaseEndsAt,
+        lateByMs:
+          Date.now() -
+          this.state.phaseEndsAt,
+      },
+    );
+
     this.state.phase = "hunt";
 
 

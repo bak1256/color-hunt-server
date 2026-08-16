@@ -437,10 +437,10 @@ export class MyRoom extends Room {
           client.sessionId,
         );
 
+      /* V101094_RESTORE_LOCAL_PAINT_FINAL */
       if (
         !player ||
-        player.role !== "hunter" ||
-        !player.alive
+        player.role !== "hunter"
       ) {
         return;
       }
@@ -623,7 +623,44 @@ export class MyRoom extends Room {
        */
       this.clock.setTimeout(
         sendBatch,
-        350,
+        750,
+      );
+
+      /*
+       * One bounded second pass for slow opponent actor creation.
+       * Only this Hunter's restored paint is replayed.
+       */
+      this.clock.setTimeout(
+        () => {
+          if (
+            !this.state.players.has(
+              client.sessionId,
+            )
+          ) {
+            return;
+          }
+
+          normalized.forEach(
+            (stroke: any) => {
+              this.clients.forEach(
+                (otherClient) => {
+                  if (
+                    otherClient.sessionId ===
+                      client.sessionId
+                  ) {
+                    return;
+                  }
+
+                  otherClient.send(
+                    "paint_stroke",
+                    stroke,
+                  );
+                },
+              );
+            },
+          );
+        },
+        2200,
       );
     },
 

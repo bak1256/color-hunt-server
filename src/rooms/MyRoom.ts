@@ -129,6 +129,7 @@ export class MyRoom extends Room {
         phase: this.state.phase,
         phaseEndsAt:
           this.state.phaseEndsAt,
+        serverNow: Date.now(),
       },
     );
   }

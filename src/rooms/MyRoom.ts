@@ -970,16 +970,79 @@ export class MyRoom extends Room {
       }
     },
 
+    /* V101069F_READY_HANDLER */
     paint_ready: (
       client: Client,
+      message: {
+        ready?: boolean;
+      },
     ): void => {
-      if (this.state.phase !== "paint") return;
+      if (this.state.phase !== "paint") {
+        return;
+      }
 
-      const player = this.state.players.get(client.sessionId);
-      if (!player || player.role !== "hider" || !player.alive) return;
+      const player =
+        this.state.players.get(
+          client.sessionId,
+        );
 
-      this.paintReadySessionIds.add(client.sessionId);
+      if (
+        !player ||
+        player.role !== "hider" ||
+        !player.alive
+      ) {
+        return;
+      }
+
+      if (message?.ready === false) {
+        this.paintReadySessionIds.delete(
+          client.sessionId,
+        );
+      } else {
+        this.paintReadySessionIds.add(
+          client.sessionId,
+        );
+      }
+
       this.broadcastPaintReadyState();
+    },
+
+    /* V101069F_EARLY_START */
+    early_start_hunt: (
+      client: Client,
+    ): void => {
+      if (this.state.phase !== "paint") {
+        return;
+      }
+
+      const requester =
+        this.state.players.get(
+          client.sessionId,
+        );
+
+      if (
+        !requester ||
+        requester.role !== "hunter" ||
+        !requester.alive
+      ) {
+        return;
+      }
+
+      const readyState =
+        this.getPaintReadyState();
+
+      if (
+        readyState.total < 1 ||
+        readyState.ready !==
+          readyState.total
+      ) {
+        return;
+      }
+
+      this.state.phaseEndsAt =
+        Date.now();
+
+      this.startHuntPhase();
     },
 
     request_paint_ready_state: (
@@ -1290,8 +1353,13 @@ export class MyRoom extends Room {
           this.state.phase,
         phaseEndsAt:
           this.state.phaseEndsAt,
+        serverNow: Date.now(),
       },
     );
+
+    if (this.state.phase === "paint") {
+      this.sendPaintReadyState(client);
+    }
   }
 
   onLeave(
@@ -1936,26 +2004,59 @@ export class MyRoom extends Room {
   private getPaintReadyState(): {
     ready: number;
     total: number;
+    readyCount: number;
+    hiderCount: number;
+    allHidersReady: boolean;
     readySessionIds: string[];
   } {
-    const activeHiderIds = [...this.state.players.entries()]
-      .filter(([, player]) => player.role === "hider" && player.alive)
-      .map(([sessionId]) => sessionId);
+    const activeHiderIds =
+      [...this.state.players.entries()]
+        .filter(
+          ([, player]) =>
+            player.role === "hider" &&
+            player.alive,
+        )
+        .map(
+          ([sessionId]) =>
+            sessionId,
+        );
 
-    const activeHiderSet = new Set(activeHiderIds);
-    for (const sessionId of this.paintReadySessionIds) {
+    const activeHiderSet =
+      new Set(activeHiderIds);
+
+    for (
+      const sessionId of
+      [...this.paintReadySessionIds]
+    ) {
       if (!activeHiderSet.has(sessionId)) {
-        this.paintReadySessionIds.delete(sessionId);
+        this.paintReadySessionIds.delete(
+          sessionId,
+        );
       }
     }
 
-    const readySessionIds = activeHiderIds.filter((sessionId) =>
-      this.paintReadySessionIds.has(sessionId),
-    );
+    const readySessionIds =
+      activeHiderIds.filter(
+        (sessionId) =>
+          this.paintReadySessionIds.has(
+            sessionId,
+          ),
+      );
+
+    const ready =
+      readySessionIds.length;
+
+    const total =
+      activeHiderIds.length;
 
     return {
-      ready: readySessionIds.length,
-      total: activeHiderIds.length,
+      ready,
+      total,
+      readyCount: ready,
+      hiderCount: total,
+      allHidersReady:
+        total > 0 &&
+        ready === total,
       readySessionIds,
     };
   }

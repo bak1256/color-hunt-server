@@ -2851,6 +2851,45 @@ export class MyRoom extends Room {
         ? "all_hiders_found"
         : "timeout",
   ): void {
+    /* V101092_FINAL_WINNER_RESOLUTION */
+    const finalAliveHiderCount =
+      [...this.state.players.values()]
+        .filter(
+          (player) =>
+            player.role === "hider" &&
+            player.alive,
+        )
+        .length;
+
+    if (
+      finalAliveHiderCount === 0
+    ) {
+      winner = "hunters";
+    }
+
+    /*
+     * If a stale callback tentatively finished as Hiders while the last
+     * Hider was eliminated in the same race, correct the stored result.
+     */
+    if (
+      this.state.phase === "finished" &&
+      this.state.winner === "hiders" &&
+      finalAliveHiderCount === 0
+    ) {
+      this.state.winner =
+        "hunters";
+
+      this.broadcast(
+        "round_result",
+        {
+          winner:
+            "hunters",
+        },
+      );
+
+      return;
+    }
+
     /* V101091_FINISH_GAME_IDEMPOTENT */
     if (
       this.state.phase ===

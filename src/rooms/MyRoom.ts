@@ -11,6 +11,7 @@ import {
 
 type JoinOptions = {
   name?: string;
+  clientKey?: string;
   roomTitle?: string;
   isPrivate?: boolean;
   password?: string;
@@ -86,6 +87,9 @@ export class MyRoom extends Room {
   state = new MyRoomState();
 
   private roomPassword = "";
+
+  private readonly clientKeyBySessionId =
+    new Map<string, string>();
 
   private readonly countdownDurationMs =
     3_000;
@@ -1268,6 +1272,77 @@ export class MyRoom extends Room {
       },
     );
 
+    /* V101074_RECONNECT_IDENTITY */
+    const clientKey =
+      String(options.clientKey ?? "")
+        .trim()
+        .slice(0, 128);
+
+    if (clientKey) {
+      for (
+        const [
+          existingSessionId,
+          existingClientKey,
+        ] of this.clientKeyBySessionId
+      ) {
+        if (
+          existingSessionId !==
+            client.sessionId &&
+          existingClientKey ===
+            clientKey &&
+          this.state.players.has(
+            existingSessionId,
+          )
+        ) {
+          const replacedPlayer =
+            this.state.players.get(
+              existingSessionId,
+            );
+
+          const replacedName =
+            replacedPlayer?.name ??
+            options.name ??
+            "Player";
+
+          this.state.players.delete(
+            existingSessionId,
+          );
+          this.lastShotAt.delete(
+            existingSessionId,
+          );
+          this.weaponHeatStates.delete(
+            existingSessionId,
+          );
+          this.hunterRoundStats.delete(
+            existingSessionId,
+          );
+          this.paintReadySessionIds.delete(
+            existingSessionId,
+          );
+          this.clientKeyBySessionId.delete(
+            existingSessionId,
+          );
+
+          if (
+            this.state.hostId ===
+              existingSessionId
+          ) {
+            this.state.hostId =
+              client.sessionId;
+          }
+
+          this.broadcast(
+            "player_reconnected",
+            {
+              name: replacedName,
+            },
+          );
+
+          break;
+        }
+      }
+    }
+
     const player =
       new PlayerState();
 
@@ -1300,6 +1375,19 @@ export class MyRoom extends Room {
       client.sessionId,
       player,
     );
+
+    /* V101074_STORE_CLIENT_KEY */
+    const stableClientKey =
+      String(options.clientKey ?? "")
+        .trim()
+        .slice(0, 128);
+
+    if (stableClientKey) {
+      this.clientKeyBySessionId.set(
+        client.sessionId,
+        stableClientKey,
+      );
+    }
 
     /*
      * 최초 생성자뿐 아니라 어떤 이유로 hostId가 비어 있는 경우에도
@@ -1450,6 +1538,11 @@ export class MyRoom extends Room {
     );
 
     this.hunterRoundStats.delete(
+      client.sessionId,
+    );
+
+    /* V101074_DELETE_CLIENT_KEY */
+    this.clientKeyBySessionId.delete(
       client.sessionId,
     );
 

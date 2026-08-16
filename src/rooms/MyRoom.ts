@@ -90,13 +90,15 @@ export class MyRoom extends Room {
   private readonly countdownDurationMs =
     3_000;
 
+  private lobbyStartAllowedAt = 0;
+
   private paintDurationMs =
     120_000;
 
   private huntDurationMs = 80_000;
 
   private readonly resultDurationMs =
-    15_000;
+    5_000;
 
   private readonly shotCooldownMs =
     450;
@@ -559,6 +561,18 @@ export class MyRoom extends Room {
         return;
       }
 
+      /* V101071_LOBBY_SETTLE_GUARD */
+      if (Date.now() < this.lobbyStartAllowedAt) {
+        client.send(
+          "start_game_error",
+          {
+            message:
+              "대기실 동기화 중입니다. 잠시 후 다시 시작해주세요.",
+          },
+        );
+        return;
+      }
+
       if (this.state.players.size < 2) {
         client.send(
           "start_game_error",
@@ -954,6 +968,7 @@ export class MyRoom extends Room {
         aliveHidersAfterShot > 0 &&
         this.allHuntersOutOfAmmo()
       ) {
+        /* v0.10.10.71: ammo depletion no longer ends Hunt early. */
         this.broadcast(
           "hunters_out_of_ammo",
           {
@@ -961,13 +976,17 @@ export class MyRoom extends Room {
               "헌터의 탄약이 모두 소진되었습니다!",
           },
         );
+      }
+    },
 
-        this.finishGame(
-          "hiders",
-          "ammo_depleted",
-        );
+    return_to_lobby: (
+      _client: Client,
+    ): void => {
+      if (this.state.phase !== "finished") {
         return;
       }
+
+      this.resetToLobby();
     },
 
     /* V101069F_READY_HANDLER */
@@ -1869,11 +1888,18 @@ export class MyRoom extends Room {
       180,
     );
 
+    const expectedHuntEndsAt =
+      this.state.phaseEndsAt;
+
     this.clock.setTimeout(
       () => {
         if (
           this.state.phase ===
-          "hunt"
+            "hunt" &&
+          this.state.phaseEndsAt ===
+            expectedHuntEndsAt &&
+          Date.now() >=
+            expectedHuntEndsAt
         ) {
           this.finishGame(
             "hiders",
@@ -1933,11 +1959,18 @@ export class MyRoom extends Room {
     this.updateRoomMetadata();
     this.broadcastPhaseChanged();
 
+    const expectedFinishedEndsAt =
+      this.state.phaseEndsAt;
+
     this.clock.setTimeout(
       () => {
         if (
           this.state.phase ===
-          "finished"
+            "finished" &&
+          this.state.phaseEndsAt ===
+            expectedFinishedEndsAt &&
+          Date.now() >=
+            expectedFinishedEndsAt
         ) {
           this.resetToLobby();
         }
@@ -1951,6 +1984,8 @@ export class MyRoom extends Room {
     this.state.phaseEndsAt = 0;
     this.state.hunterCount = 0;
     this.state.winner = "";
+    /* V101071_LOBBY_SETTLE_RESET */
+    this.lobbyStartAllowedAt = Date.now() + 1_000;
     /* V101069_READY_RESET */
     this.paintReadySessionIds.clear();
 

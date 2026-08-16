@@ -12,6 +12,7 @@ import {
 type JoinOptions = {
   name?: string;
   clientKey?: string;
+  reconnectFallback?: boolean;
   roomTitle?: string;
   isPrivate?: boolean;
   password?: string;
@@ -1680,6 +1681,49 @@ export class MyRoom extends Room {
       client.sessionId,
       player,
     );
+
+    /* V101088_TARGETED_RECONNECT_PAINT */
+    if (
+      options.reconnectFallback === true &&
+      this.state.phase !== "lobby"
+    ) {
+      [900, 1800].forEach(
+        (delay) => {
+          this.clock.setTimeout(
+            () => {
+              if (
+                !this.state.players.has(
+                  client.sessionId,
+                )
+              ) {
+                return;
+              }
+
+              const reconnectPaint =
+                this.roundPaintStrokes.get(
+                  client.sessionId,
+                ) ?? [];
+
+              if (
+                reconnectPaint.length <
+                1
+              ) {
+                return;
+              }
+
+              this.broadcast(
+                "reconnected_player_paint",
+                {
+                  strokes:
+                    reconnectPaint,
+                },
+              );
+            },
+            delay,
+          );
+        },
+      );
+    }
 
     /* V101085_REJOIN_FULL_STATE_PULSE */
     if (

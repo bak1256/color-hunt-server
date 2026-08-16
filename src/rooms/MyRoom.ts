@@ -1356,6 +1356,15 @@ export class MyRoom extends Room {
       },
     );
 
+    /* V101073_LOBBY_DROP_CLEANUP */
+    if (this.state.phase === "lobby") {
+      this.onLeave(
+        client,
+        code as CloseCode,
+      );
+      return;
+    }
+
     try {
       await this.allowReconnection(
         client,
@@ -1410,6 +1419,15 @@ export class MyRoom extends Room {
     client: Client,
     _code: CloseCode,
   ): void {
+    /* V101073_DUPLICATE_LEAVE_GUARD */
+    if (
+      !this.state.players.has(
+        client.sessionId,
+      )
+    ) {
+      return;
+    }
+
     const leavingPlayer =
       this.state.players.get(
         client.sessionId,

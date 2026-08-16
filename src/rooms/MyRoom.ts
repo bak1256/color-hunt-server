@@ -91,6 +91,21 @@ export class MyRoom extends Room {
   private readonly clientKeyBySessionId =
     new Map<string, string>();
 
+  private readonly rejoinStateByClientKey =
+    new Map<
+      string,
+      {
+        role: "hunter" | "hider";
+        alive: boolean;
+        hunterVolunteer: boolean;
+        x: number;
+        y: number;
+        expiresAt: number;
+      }
+    >();
+
+  private noHunterGraceGeneration = 0;
+
   private readonly countdownDurationMs =
     3_000;
 
@@ -1304,6 +1319,33 @@ export class MyRoom extends Room {
             options.name ??
             "Player";
 
+          /* V101078_CAPTURE_REPLACED_STATE */
+          if (
+            replacedPlayer &&
+            this.state.phase !==
+              "lobby"
+          ) {
+            this.rejoinStateByClientKey.set(
+              clientKey,
+              {
+                role:
+                  replacedPlayer.role,
+                alive:
+                  replacedPlayer.alive,
+                hunterVolunteer:
+                  replacedPlayer
+                    .hunterVolunteer,
+                x:
+                  replacedPlayer.x,
+                y:
+                  replacedPlayer.y,
+                expiresAt:
+                  Date.now() +
+                  35_000,
+              },
+            );
+          }
+
           this.state.players.delete(
             existingSessionId,
           );
@@ -1370,6 +1412,39 @@ export class MyRoom extends Room {
 
     player.x = lobbyPosition.x;
     player.y = lobbyPosition.y;
+
+    /* V101078_RESTORE_REJOIN_STATE */
+    if (clientKey) {
+      const saved =
+        this.rejoinStateByClientKey.get(
+          clientKey,
+        );
+
+      if (
+        saved &&
+        saved.expiresAt >
+          Date.now() &&
+        this.state.phase !==
+          "lobby"
+      ) {
+        player.role =
+          saved.role;
+        player.alive =
+          saved.alive;
+        player.hunterVolunteer =
+          saved.hunterVolunteer;
+        player.x =
+          saved.x;
+        player.y =
+          saved.y;
+
+        this.rejoinStateByClientKey.delete(
+          clientKey,
+        );
+      }
+    }
+
+    this.noHunterGraceGeneration += 1;
 
     this.state.players.set(
       client.sessionId,
@@ -1470,6 +1545,9 @@ export class MyRoom extends Room {
   onReconnect(
     client: Client,
   ): void {
+    /* V101078_CANCEL_NO_HUNTER_ON_RECONNECT */
+    this.noHunterGraceGeneration += 1;
+
     console.log(
       "[Chameleon Hunt] reconnected",
       {
@@ -1569,6 +1647,38 @@ export class MyRoom extends Room {
     const leavingName =
       leavingPlayer?.name ??
       "Player";
+
+    /* V101078_CAPTURE_LEAVE_STATE */
+    const leavingClientKey =
+      this.clientKeyBySessionId.get(
+        client.sessionId,
+      ) ?? "";
+
+    if (
+      leavingClientKey &&
+      leavingPlayer &&
+      this.state.phase !== "lobby"
+    ) {
+      this.rejoinStateByClientKey.set(
+        leavingClientKey,
+        {
+          role:
+            leavingPlayer.role,
+          alive:
+            leavingPlayer.alive,
+          hunterVolunteer:
+            leavingPlayer
+              .hunterVolunteer,
+          x:
+            leavingPlayer.x,
+          y:
+            leavingPlayer.y,
+          expiresAt:
+            Date.now() +
+            35_000,
+        },
+      );
+    }
 
     this.state.players.delete(
       client.sessionId,
@@ -1697,7 +1807,11 @@ export class MyRoom extends Room {
           hunterCount < 1 &&
           hiderCount >= 1
         ) {
-          this.finishGame("hiders");
+          /*
+           * v0.10.10.78:
+           * Network handoff is not a victory condition.
+           */
+          this.scheduleNoHunterGraceResolution();
           return;
         }
 
@@ -1714,7 +1828,11 @@ export class MyRoom extends Room {
           hunterCount < 1 &&
           hiderCount >= 1
         ) {
-          this.finishGame("hiders");
+          /*
+           * v0.10.10.78:
+           * Network handoff is not a victory condition.
+           */
+          this.scheduleNoHunterGraceResolution();
           return;
         }
 
@@ -2111,6 +2229,60 @@ export class MyRoom extends Room {
         }
       },
       this.huntDurationMs,
+    );
+  }
+
+  private scheduleNoHunterGraceResolution(): void {
+    const generation =
+      ++this.noHunterGraceGeneration;
+
+    this.clock.setTimeout(
+      () => {
+        if (
+          generation !==
+            this.noHunterGraceGeneration
+        ) {
+          return;
+        }
+
+        if (
+          this.state.phase !==
+            "countdown" &&
+          this.state.phase !==
+            "paint" &&
+          this.state.phase !==
+            "hunt"
+        ) {
+          return;
+        }
+
+        const players =
+          [...this.state.players.values()];
+
+        const hunterCount =
+          players.filter(
+            (player) =>
+              player.role ===
+                "hunter",
+          ).length;
+
+        const hiderCount =
+          players.filter(
+            (player) =>
+              player.role ===
+                "hider",
+          ).length;
+
+        if (
+          hunterCount < 1 &&
+          hiderCount >= 1
+        ) {
+          this.finishGame(
+            "hiders",
+          );
+        }
+      },
+      30_000,
     );
   }
 

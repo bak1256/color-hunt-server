@@ -1374,6 +1374,28 @@ export class MyRoom extends Room {
               existingSessionId,
             );
 
+          /* V101091_CAPTURE_RECONNECT_SELF_PAINT */
+          const reconnectSelfPaint =
+            [...this.roundPaintStrokes.values()]
+              .flat()
+              .filter(
+                (stroke: any) =>
+                  stroke.targetSessionId ===
+                    existingSessionId,
+              )
+              .map(
+                (stroke: any) => ({
+                  ...stroke,
+                  senderId:
+                    stroke.senderId ===
+                      existingSessionId
+                      ? client.sessionId
+                      : stroke.senderId,
+                  targetSessionId:
+                    client.sessionId,
+                }),
+              );
+
           const replacedName =
             replacedPlayer?.name ??
             options.name ??
@@ -1610,6 +1632,122 @@ export class MyRoom extends Room {
               name: replacedName,
             },
           );
+
+          if (
+            reconnectSelfPaint.length >
+            0
+          ) {
+            this.clock.setTimeout(
+              () => {
+                if (
+                  !this.state.players.has(
+                    client.sessionId,
+                  )
+                ) {
+                  return;
+                }
+
+                let cursor = 0;
+
+                const replayBatch =
+                  (): void => {
+                    if (
+                      !this.state.players.has(
+                        client.sessionId,
+                      )
+                    ) {
+                      return;
+                    }
+
+                    const end =
+                      Math.min(
+                        reconnectSelfPaint.length,
+                        cursor + 6,
+                      );
+
+                    for (
+                      ;
+                      cursor < end;
+                      cursor += 1
+                    ) {
+                      const stroke =
+                        reconnectSelfPaint[cursor];
+
+                      this.broadcast(
+                        "paint_stroke",
+                        {
+                          senderId:
+                            stroke.senderId,
+                          targetSessionId:
+                            client.sessionId,
+                          color:
+                            stroke.color,
+                          size:
+                            stroke.size,
+                          shape:
+                            stroke.shape,
+                          points:
+                            stroke.points,
+                        },
+                      );
+                    }
+
+                    if (
+                      cursor <
+                      reconnectSelfPaint.length
+                    ) {
+                      this.clock.setTimeout(
+                        replayBatch,
+                        90,
+                      );
+                    }
+                  };
+
+                replayBatch();
+              },
+              1400,
+            );
+
+            /*
+             * One delayed second pass only for this player's paint.
+             * This covers slower opponent Schema creation without replaying
+             * the whole round or touching reconnect state.
+             */
+            this.clock.setTimeout(
+              () => {
+                if (
+                  !this.state.players.has(
+                    client.sessionId,
+                  )
+                ) {
+                  return;
+                }
+
+                reconnectSelfPaint.forEach(
+                  (stroke: any) => {
+                    this.broadcast(
+                      "paint_stroke",
+                      {
+                        senderId:
+                          stroke.senderId,
+                        targetSessionId:
+                          client.sessionId,
+                        color:
+                          stroke.color,
+                        size:
+                          stroke.size,
+                        shape:
+                          stroke.shape,
+                        points:
+                          stroke.points,
+                      },
+                    );
+                  },
+                );
+              },
+              3200,
+            );
+          }
 
           break;
         }
@@ -2713,6 +2851,20 @@ export class MyRoom extends Room {
         ? "all_hiders_found"
         : "timeout",
   ): void {
+    /* V101091_FINISH_GAME_IDEMPOTENT */
+    if (
+      this.state.phase ===
+        "finished" &&
+      (
+        this.state.winner ===
+          "hunters" ||
+        this.state.winner ===
+          "hiders"
+      )
+    ) {
+      return;
+    }
+
     if (
       this.state.phase ===
       "finished"

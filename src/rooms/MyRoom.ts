@@ -1454,9 +1454,10 @@ export class MyRoom extends Room {
     }
 
     try {
+      /* V101075_RECONNECT_30S */
       await this.allowReconnection(
         client,
-        10,
+        30,
       );
     } catch {
       /*
@@ -1476,6 +1477,21 @@ export class MyRoom extends Room {
           client.sessionId,
         phase:
           this.state.phase,
+      },
+    );
+
+    /* V101075_REAL_RECONNECT_NOTICE */
+    const reconnectedPlayer =
+      this.state.players.get(
+        client.sessionId,
+      );
+
+    this.broadcast(
+      "player_reconnected",
+      {
+        name:
+          reconnectedPlayer?.name ??
+          "Player",
       },
     );
 

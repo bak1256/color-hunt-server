@@ -1365,6 +1365,9 @@ export class MyRoom extends Room {
             existingSessionId,
           );
 
+          /* V101079_REPLACEMENT_CANCELS_DISCONNECT_OUTCOME */
+          this.noHunterGraceGeneration += 1;
+
           if (
             this.state.hostId ===
               existingSessionId
@@ -1480,6 +1483,42 @@ export class MyRoom extends Room {
     );
 
     this.updateRoomMetadata();
+
+    /* V101079_REJOIN_SNAPSHOT_PULSE */
+    if (
+      this.state.phase !== "lobby"
+    ) {
+      this.sendLobbySnapshot(
+        client,
+      );
+
+      client.send(
+        "phase_changed",
+        {
+          phase:
+            this.state.phase,
+          phaseEndsAt:
+            this.state.phaseEndsAt,
+          serverNow:
+            Date.now(),
+        },
+      );
+
+      this.clock.setTimeout(
+        () => {
+          if (
+            this.clients.includes(
+              client,
+            )
+          ) {
+            this.sendLobbySnapshot(
+              client,
+            );
+          }
+        },
+        120,
+      );
+    }
 
     console.log(
       "[Chameleon Hunt] onJoin complete",
@@ -1811,7 +1850,11 @@ export class MyRoom extends Room {
            * v0.10.10.78:
            * Network handoff is not a victory condition.
            */
-          this.scheduleNoHunterGraceResolution();
+          /*
+           * v0.10.10.79:
+           * Temporary loss of all Hunters does not end the match.
+           * Hunt's authoritative deadline remains the victory condition.
+           */
           return;
         }
 
@@ -1832,7 +1875,11 @@ export class MyRoom extends Room {
            * v0.10.10.78:
            * Network handoff is not a victory condition.
            */
-          this.scheduleNoHunterGraceResolution();
+          /*
+           * v0.10.10.79:
+           * Temporary loss of all Hunters does not end the match.
+           * Hunt's authoritative deadline remains the victory condition.
+           */
           return;
         }
 
@@ -2232,59 +2279,7 @@ export class MyRoom extends Room {
     );
   }
 
-  private scheduleNoHunterGraceResolution(): void {
-    const generation =
-      ++this.noHunterGraceGeneration;
 
-    this.clock.setTimeout(
-      () => {
-        if (
-          generation !==
-            this.noHunterGraceGeneration
-        ) {
-          return;
-        }
-
-        if (
-          this.state.phase !==
-            "countdown" &&
-          this.state.phase !==
-            "paint" &&
-          this.state.phase !==
-            "hunt"
-        ) {
-          return;
-        }
-
-        const players =
-          [...this.state.players.values()];
-
-        const hunterCount =
-          players.filter(
-            (player) =>
-              player.role ===
-                "hunter",
-          ).length;
-
-        const hiderCount =
-          players.filter(
-            (player) =>
-              player.role ===
-                "hider",
-          ).length;
-
-        if (
-          hunterCount < 1 &&
-          hiderCount >= 1
-        ) {
-          this.finishGame(
-            "hiders",
-          );
-        }
-      },
-      30_000,
-    );
-  }
 
   private finishGame(
     winner: "hunters" | "hiders",

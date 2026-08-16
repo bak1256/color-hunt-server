@@ -952,6 +952,8 @@ export class MyRoom extends Room {
           ? "forest"
           : requested;
 
+      this.updateRoomMetadata();
+
       this.clients.forEach(
         (connectedClient) => {
           this.sendLobbySnapshot(
@@ -1838,6 +1840,10 @@ export class MyRoom extends Room {
         this.maxClients,
       phase:
         this.state.phase,
+      selectedMap:
+        this.state.selectedMap,
+      activeMap:
+        this.state.activeMap,
     };
   }
 
@@ -3900,6 +3906,10 @@ export class MyRoom extends Room {
         this.maxClients,
       phase:
         this.state.phase,
+      selectedMap:
+        this.state.selectedMap,
+      activeMap:
+        this.state.activeMap,
     });
   }
 }

@@ -1456,7 +1456,21 @@ export class MyRoom extends Room {
               "헌터의 탄약이 모두 소진되었습니다!",
           },
         );
-      }
+      
+        /*
+         * V1010182_MULTIPLAYER_AMMO_DEPLETION_FINISH
+         *
+         * Multiplayer rule: if at least one Hider survives after the shot and
+         * every living Hunter has 0 reserve, the round is over immediately.
+         * finishGame() owns phase=finished, round_result, phase_changed and
+         * the normal timed resetToLobby() path.
+         */
+        this.finishGame(
+          "hiders",
+          "ammo_depleted",
+        );
+        return;
+}
     },
 
     return_to_lobby: (

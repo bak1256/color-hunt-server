@@ -89,6 +89,24 @@ export class MyRoom extends Room {
 
   private roomPassword = "";
 
+  /*
+   * V1010167_GHOST_ROOM_LIFECYCLE_ROBUST
+   * state.players may retain reconnectable users.
+   * This set contains only clients connected RIGHT NOW.
+   */
+  private readonly liveSessionIds =
+    new Set<string>();
+
+  private syncRoomListingVisibility(): void {
+    const shouldHide =
+      this.state.isPrivate ||
+      this.liveSessionIds.size === 0;
+
+    this.setPrivate(
+      shouldHide,
+    );
+  }
+
   private readonly clientKeyBySessionId =
     new Map<string, string>();
 
@@ -1785,6 +1803,8 @@ export class MyRoom extends Room {
   onCreate(
     options: JoinOptions,
   ): void {
+    this.autoDispose = true;
+
     /*
      * clock timeout이 어떤 이유로 지연되더라도 phaseEndsAt을 기준으로
      * 250ms마다 서버가 라운드 진행 상태를 보정합니다.
@@ -1845,7 +1865,12 @@ export class MyRoom extends Room {
       activeMap:
         this.state.activeMap,
     };
-  }
+  
+    /*
+     * Keep empty reservation shell hidden until creator really joins.
+     */
+    this.syncRoomListingVisibility();
+}
 
   onAuth(
     _client: Client,
@@ -1865,6 +1890,12 @@ export class MyRoom extends Room {
     client: Client,
     options: JoinOptions,
   ): void {
+    this.liveSessionIds.add(
+      client.sessionId,
+    );
+
+    this.syncRoomListingVisibility();
+
     console.log(
       "[Chameleon Hunt] onJoin begin",
       {
@@ -2599,6 +2630,13 @@ export class MyRoom extends Room {
     client: Client,
     code: number,
   ): Promise<void> {
+    this.liveSessionIds.delete(
+      client.sessionId,
+    );
+
+    this.updateRoomMetadata();
+    this.syncRoomListingVisibility();
+
     /*
      * Colyseus 0.17 distinguishes a temporary network drop from a real
      * leave when onDrop() is implemented.
@@ -2645,6 +2683,13 @@ export class MyRoom extends Room {
   onReconnect(
     client: Client,
   ): void {
+    this.liveSessionIds.add(
+      client.sessionId,
+    );
+
+    this.updateRoomMetadata();
+    this.syncRoomListingVisibility();
+
     /* V101078_CANCEL_NO_HUNTER_ON_RECONNECT */
     this.noHunterGraceGeneration += 1;
 
@@ -2758,6 +2803,16 @@ export class MyRoom extends Room {
     client: Client,
     _code: CloseCode,
   ): void {
+    this.liveSessionIds.delete(
+      client.sessionId,
+    );
+
+    /*
+     * Hide/update before any round-specific early return.
+     */
+    this.updateRoomMetadata();
+    this.syncRoomListingVisibility();
+
     /* V101073_DUPLICATE_LEAVE_GUARD */
     if (
       !this.state.players.has(
@@ -3893,6 +3948,18 @@ export class MyRoom extends Room {
     this.state.hostId = "";
     this.ensureValidHost();
   }
+  onDispose(): void {
+    this.liveSessionIds.clear();
+
+    console.log(
+      "[Color Hunt] room disposed",
+      {
+        roomId:
+          this.roomId,
+      },
+    );
+  }
+
 
   private updateRoomMetadata(): void {
     void this.setMetadata({
@@ -3901,7 +3968,7 @@ export class MyRoom extends Room {
       isPrivate:
         this.state.isPrivate,
       playerCount:
-        this.state.players.size,
+        this.liveSessionIds.size,
       maxClients:
         this.maxClients,
       phase:

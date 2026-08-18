@@ -97,6 +97,15 @@ export class MyRoom extends Room {
   private readonly liveSessionIds =
     new Set<string>();
 
+  /*
+   * v0.10.10.230 CONNECTION OWNERSHIP:
+   * A fresh clientKey handoff permanently supersedes the old transport
+   * session. If that old browser socket wakes later, it must never become
+   * authoritative again.
+   */
+  private readonly supersededSessionIds =
+    new Set<string>();
+
   private syncRoomListingVisibility(): void {
     const shouldHide =
       this.state.isPrivate ||
@@ -2002,6 +2011,17 @@ export class MyRoom extends Room {
             );
           }
 
+          /*
+           * The new stable-clientKey session is now the only owner of this
+           * player identity. A late onReconnect from the old socket is stale.
+           */
+          this.supersededSessionIds.add(
+            existingSessionId,
+          );
+          this.liveSessionIds.delete(
+            existingSessionId,
+          );
+
           this.state.players.delete(
             existingSessionId,
           );
@@ -2697,6 +2717,35 @@ export class MyRoom extends Room {
   onReconnect(
     client: Client,
   ): void {
+    /*
+     * A fresh clientKey handoff may have replaced this exact old session
+     * while the browser was asleep. Ignore a late transport resurrection;
+     * otherwise the ghost socket can interfere with host/player ownership.
+     */
+    if (
+      this.supersededSessionIds.has(
+        client.sessionId,
+      ) ||
+      !this.state.players.has(
+        client.sessionId,
+      )
+    ) {
+      this.liveSessionIds.delete(
+        client.sessionId,
+      );
+      this.updateRoomMetadata();
+      this.syncRoomListingVisibility();
+
+      console.warn(
+        "[Chameleon Hunt] ignored stale reconnect",
+        {
+          sessionId:
+            client.sessionId,
+        },
+      );
+      return;
+    }
+
     this.liveSessionIds.add(
       client.sessionId,
     );
@@ -3567,6 +3616,53 @@ export class MyRoom extends Room {
   private resetToLobby(): void {
     this.state.phase = "lobby";
     this.state.phaseEndsAt = 0;
+
+    /*
+     * v0.10.10.230 GHOST PLAYER/HOST CLEANUP:
+     * Reconnect reservations are useful during a round, but after a round
+     * ends they must not become permanent lobby occupants. Remove every
+     * state player whose transport is no longer live, then re-elect a live
+     * host before the next game can start.
+     */
+    for (
+      const sessionId of
+      [...this.state.players.keys()]
+    ) {
+      if (
+        this.liveSessionIds.has(
+          sessionId,
+        )
+      ) {
+        continue;
+      }
+
+      this.state.players.delete(
+        sessionId,
+      );
+      this.clientKeyBySessionId.delete(
+        sessionId,
+      );
+      this.paintReadySessionIds.delete(
+        sessionId,
+      );
+      this.lastShotAt.delete(
+        sessionId,
+      );
+      this.weaponHeatStates.delete(
+        sessionId,
+      );
+      this.hunterRoundStats.delete(
+        sessionId,
+      );
+      this.lobbyAvatarPresets.delete(
+        sessionId,
+      );
+      this.roundPaintStrokes.delete(
+        sessionId,
+      );
+    }
+
+    this.ensureValidHost();
     this.state.hunterCount = 0;
     this.state.winner = "";
     /* V101071_LOBBY_SETTLE_RESET */
@@ -3915,25 +4011,38 @@ export class MyRoom extends Room {
 
   private ensureValidHost(): void {
     /*
-     * hostId가 비어 있거나 이미 나간 플레이어를 가리키면
-     * 현재 첫 번째 플레이어를 즉시 방장으로 지정합니다.
-     *
-     * 이 로직은 서버가 authoritative하게 방장 상태를 보장하므로
-     * 클라이언트의 hostId 복제 타이밍에 의존하지 않습니다.
+     * v0.10.10.230 GHOST HOST FIX:
+     * During an active round a temporarily dropped host may remain in
+     * state.players for reconnection. Once we are in the lobby, however,
+     * only a player whose transport is currently live may own host rights.
      */
-    if (
-      this.state.hostId &&
+    const hostExists =
+      Boolean(this.state.hostId) &&
       this.state.players.has(
         this.state.hostId,
-      )
-    ) {
+      );
+
+    const hostIsUsable =
+      this.state.phase === "lobby"
+        ? hostExists &&
+          this.liveSessionIds.has(
+            this.state.hostId,
+          )
+        : hostExists;
+
+    if (hostIsUsable) {
       return;
     }
 
     const remainingSessionIds =
-      [
-        ...this.state.players.keys(),
-      ];
+      [...this.state.players.keys()]
+        .filter(
+          (sessionId) =>
+            this.state.phase !== "lobby" ||
+            this.liveSessionIds.has(
+              sessionId,
+            ),
+        );
 
     if (
       remainingSessionIds.length === 0
@@ -3942,10 +4051,6 @@ export class MyRoom extends Room {
       return;
     }
 
-    /*
-     * 기존 방장이 나갔을 때 남아 있는 플레이어 중 한 명에게
-     * 방장 권한을 랜덤으로 넘깁니다.
-     */
     const randomIndex =
       Math.floor(
         Math.random() *
@@ -3964,6 +4069,7 @@ export class MyRoom extends Room {
   }
   onDispose(): void {
     this.liveSessionIds.clear();
+    this.supersededSessionIds.clear();
 
     console.log(
       "[Color Hunt] room disposed",

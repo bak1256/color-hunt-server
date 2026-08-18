@@ -134,6 +134,23 @@ export class MyRoom extends Room {
 
   private noHunterGraceGeneration = 0;
 
+  /*
+   * v0.10.10.238 DISCONNECT OUTCOME GRACE
+   *
+   * Session preservation (5 min) and round outcome are separate concerns.
+   * A browser may return much later and still recover identity, but a live
+   * round must not wait forever when an entire role is gone.
+   */
+  private hunterDisconnectOutcomeGeneration = 0;
+  private allHiderDisconnectOutcomeGeneration = 0;
+  private readonly hiderDisconnectGenerationBySessionId =
+    new Map<string, number>();
+
+  private readonly disconnectSilentGraceMs =
+    10_000;
+  private readonly disconnectVisibleCountdownSeconds =
+    5;
+
   private readonly countdownDurationMs =
     3_000;
 
@@ -2453,6 +2470,10 @@ export class MyRoom extends Room {
       player,
     );
 
+    this.markRoleConnectionRestored(
+      client.sessionId,
+    );
+
     /* V101090_SAFE_EXISTING_PAINT_STROKE_REPLAY */
     if (
       options.reconnectFallback === true &&
@@ -2699,6 +2720,413 @@ export class MyRoom extends Room {
     );
   }
 
+  private isDisconnectOutcomePhase(): boolean {
+    return (
+      this.state.phase === "countdown" ||
+      this.state.phase === "paint" ||
+      this.state.phase === "hunt"
+    );
+  }
+
+  private countLiveRole(
+    role: "hunter" | "hider",
+  ): number {
+    let count = 0;
+
+    for (
+      const sessionId of
+      this.liveSessionIds
+    ) {
+      const player =
+        this.state.players.get(
+          sessionId,
+        );
+
+      if (
+        player &&
+        player.role === role &&
+        (
+          role === "hunter" ||
+          player.alive
+        )
+      ) {
+        count += 1;
+      }
+    }
+
+    return count;
+  }
+
+  private broadcastRoleDisconnectCountdown(
+    role: "hunter" | "hider",
+    remaining: number,
+    cancelled = false,
+  ): void {
+    this.broadcast(
+      "role_disconnect_countdown",
+      {
+        role,
+        remaining,
+        cancelled,
+      },
+    );
+  }
+
+  private cancelDisconnectOutcomeForRole(
+    role: "hunter" | "hider",
+  ): void {
+    if (role === "hunter") {
+      this.hunterDisconnectOutcomeGeneration += 1;
+    } else {
+      this.allHiderDisconnectOutcomeGeneration += 1;
+    }
+
+    if (
+      this.isDisconnectOutcomePhase()
+    ) {
+      this.broadcastRoleDisconnectCountdown(
+        role,
+        0,
+        true,
+      );
+    }
+  }
+
+  private scheduleAllHuntersDisconnectedOutcome(): void {
+    if (
+      !this.isDisconnectOutcomePhase() ||
+      this.countLiveRole("hunter") > 0
+    ) {
+      return;
+    }
+
+    const generation =
+      ++this.hunterDisconnectOutcomeGeneration;
+
+    this.clock.setTimeout(
+      () => {
+        if (
+          generation !==
+            this.hunterDisconnectOutcomeGeneration ||
+          !this.isDisconnectOutcomePhase() ||
+          this.countLiveRole("hunter") > 0
+        ) {
+          return;
+        }
+
+        const tick =
+          (
+            remaining: number,
+          ): void => {
+            if (
+              generation !==
+                this.hunterDisconnectOutcomeGeneration ||
+              !this.isDisconnectOutcomePhase()
+            ) {
+              return;
+            }
+
+            if (
+              this.countLiveRole("hunter") >
+              0
+            ) {
+              this.cancelDisconnectOutcomeForRole(
+                "hunter",
+              );
+              return;
+            }
+
+            if (remaining <= 0) {
+              /*
+               * No live Hunter returned within 10 sec silent grace + 5 sec
+               * visible countdown. Preserve session identity separately, but
+               * end this round cleanly so everybody else is never trapped.
+               */
+              this.finishGame(
+                "hiders",
+                "timeout",
+              );
+              return;
+            }
+
+            this.broadcastRoleDisconnectCountdown(
+              "hunter",
+              remaining,
+            );
+
+            this.clock.setTimeout(
+              () => {
+                tick(
+                  remaining - 1,
+                );
+              },
+              1_000,
+            );
+          };
+
+        tick(
+          this.disconnectVisibleCountdownSeconds,
+        );
+      },
+      this.disconnectSilentGraceMs,
+    );
+  }
+
+  private scheduleAllHidersDisconnectedOutcome(): void {
+    if (
+      !this.isDisconnectOutcomePhase() ||
+      this.countLiveRole("hider") > 0
+    ) {
+      return;
+    }
+
+    const hasAliveHider =
+      [...this.state.players.values()]
+        .some(
+          (player) =>
+            player.role === "hider" &&
+            player.alive,
+        );
+
+    if (!hasAliveHider) {
+      return;
+    }
+
+    const generation =
+      ++this.allHiderDisconnectOutcomeGeneration;
+
+    this.clock.setTimeout(
+      () => {
+        if (
+          generation !==
+            this.allHiderDisconnectOutcomeGeneration ||
+          !this.isDisconnectOutcomePhase() ||
+          this.countLiveRole("hider") > 0
+        ) {
+          return;
+        }
+
+        const tick =
+          (
+            remaining: number,
+          ): void => {
+            if (
+              generation !==
+                this.allHiderDisconnectOutcomeGeneration ||
+              !this.isDisconnectOutcomePhase()
+            ) {
+              return;
+            }
+
+            if (
+              this.countLiveRole("hider") >
+              0
+            ) {
+              this.cancelDisconnectOutcomeForRole(
+                "hider",
+              );
+              return;
+            }
+
+            if (remaining <= 0) {
+              /*
+               * Every still-alive Hider is offline after the full grace.
+               * Mark those offline Hiders eliminated before finishGame so its
+               * finalAliveHiderCount authority resolves to Hunters.
+               */
+              for (
+                const [
+                  sessionId,
+                  player,
+                ] of this.state.players
+              ) {
+                if (
+                  player.role !== "hider" ||
+                  !player.alive ||
+                  this.liveSessionIds.has(
+                    sessionId,
+                  )
+                ) {
+                  continue;
+                }
+
+                player.alive = false;
+                this.paintReadySessionIds.delete(
+                  sessionId,
+                );
+              }
+
+              this.finishGame(
+                "hunters",
+                "all_hiders_found",
+              );
+              return;
+            }
+
+            this.broadcastRoleDisconnectCountdown(
+              "hider",
+              remaining,
+            );
+
+            this.clock.setTimeout(
+              () => {
+                tick(
+                  remaining - 1,
+                );
+              },
+              1_000,
+            );
+          };
+
+        tick(
+          this.disconnectVisibleCountdownSeconds,
+        );
+      },
+      this.disconnectSilentGraceMs,
+    );
+  }
+
+  private scheduleDisconnectedHiderElimination(
+    sessionId: string,
+  ): void {
+    const player =
+      this.state.players.get(
+        sessionId,
+      );
+
+    if (
+      !player ||
+      player.role !== "hider" ||
+      !player.alive
+    ) {
+      return;
+    }
+
+    const generation =
+      (
+        this.hiderDisconnectGenerationBySessionId.get(
+          sessionId,
+        ) ?? 0
+      ) + 1;
+
+    this.hiderDisconnectGenerationBySessionId.set(
+      sessionId,
+      generation,
+    );
+
+    const totalGraceMs =
+      this.disconnectSilentGraceMs +
+      this.disconnectVisibleCountdownSeconds *
+        1_000;
+
+    this.clock.setTimeout(
+      () => {
+        if (
+          !this.isDisconnectOutcomePhase() ||
+          this.liveSessionIds.has(
+            sessionId,
+          ) ||
+          this.hiderDisconnectGenerationBySessionId.get(
+            sessionId,
+          ) !== generation
+        ) {
+          return;
+        }
+
+        const current =
+          this.state.players.get(
+            sessionId,
+          );
+
+        if (
+          !current ||
+          current.role !== "hider" ||
+          !current.alive
+        ) {
+          return;
+        }
+
+        current.alive = false;
+
+        this.paintReadySessionIds.delete(
+          sessionId,
+        );
+
+        this.broadcast(
+          "player_disconnect_eliminated",
+          {
+            sessionId,
+            name:
+              current.name ??
+              "Player",
+          },
+        );
+
+        this.broadcastPaintReadyState();
+
+        const anyAliveHider =
+          [...this.state.players.values()]
+            .some(
+              (candidate) =>
+                candidate.role === "hider" &&
+                candidate.alive,
+            );
+
+        if (!anyAliveHider) {
+          this.finishGame(
+            "hunters",
+            "all_hiders_found",
+          );
+        }
+      },
+      totalGraceMs,
+    );
+  }
+
+  private markRoleConnectionRestored(
+    sessionId: string,
+  ): void {
+    const player =
+      this.state.players.get(
+        sessionId,
+      );
+
+    if (!player) {
+      return;
+    }
+
+    if (player.role === "hunter") {
+      if (
+        this.countLiveRole("hunter") > 0
+      ) {
+        this.cancelDisconnectOutcomeForRole(
+          "hunter",
+        );
+      }
+      return;
+    }
+
+    const generation =
+      (
+        this.hiderDisconnectGenerationBySessionId.get(
+          sessionId,
+        ) ?? 0
+      ) + 1;
+
+    this.hiderDisconnectGenerationBySessionId.set(
+      sessionId,
+      generation,
+    );
+
+    if (
+      this.countLiveRole("hider") > 0
+    ) {
+      this.cancelDisconnectOutcomeForRole(
+        "hider",
+      );
+    }
+  }
+
   async onDrop(
     client: Client,
     code: number,
@@ -2737,6 +3165,41 @@ export class MyRoom extends Room {
         code as CloseCode,
       );
       return;
+    }
+
+    /*
+     * v0.10.10.238:
+     * onDrop is the authoritative start signal. Browser blur/hidden alone is
+     * never enough. Role outcome grace runs independently of the 5-minute
+     * allowReconnection reservation below.
+     */
+    const droppedPlayer =
+      this.state.players.get(
+        client.sessionId,
+      );
+
+    if (
+      droppedPlayer &&
+      this.isDisconnectOutcomePhase()
+    ) {
+      if (
+        droppedPlayer.role === "hunter" &&
+        this.countLiveRole("hunter") === 0
+      ) {
+        this.scheduleAllHuntersDisconnectedOutcome();
+      } else if (
+        droppedPlayer.role === "hider"
+      ) {
+        this.scheduleDisconnectedHiderElimination(
+          client.sessionId,
+        );
+
+        if (
+          this.countLiveRole("hider") === 0
+        ) {
+          this.scheduleAllHidersDisconnectedOutcome();
+        }
+      }
     }
 
     try {
@@ -2801,6 +3264,10 @@ export class MyRoom extends Room {
     }
 
     this.liveSessionIds.add(
+      client.sessionId,
+    );
+
+    this.markRoleConnectionRestored(
       client.sessionId,
     );
 
@@ -3670,6 +4137,21 @@ export class MyRoom extends Room {
   private resetToLobby(): void {
     this.state.phase = "lobby";
     this.state.phaseEndsAt = 0;
+
+    this.hunterDisconnectOutcomeGeneration += 1;
+    this.allHiderDisconnectOutcomeGeneration += 1;
+    this.hiderDisconnectGenerationBySessionId.clear();
+
+    this.broadcastRoleDisconnectCountdown(
+      "hunter",
+      0,
+      true,
+    );
+    this.broadcastRoleDisconnectCountdown(
+      "hider",
+      0,
+      true,
+    );
 
     /*
      * v0.10.10.230 GHOST PLAYER/HOST CLEANUP:

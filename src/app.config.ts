@@ -50,15 +50,11 @@ const server = defineServer({
                                   }
                                 | undefined;
 
+                        // Keep every public Color Hunt room visible while a match is active.
+                        // Joinability is handled separately by the client.
                         return (
                             room.clients > 0 &&
-                            room.private !== true &&
-                            room.unlisted !== true &&
-                            metadata?.isPrivate !== true &&
-                            (
-                                metadata?.phase === undefined ||
-                                metadata.phase === "lobby"
-                            )
+                            metadata?.isPrivate !== true
                         );
                     })
                     .map((room) => ({

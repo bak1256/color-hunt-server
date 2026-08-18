@@ -2042,6 +2042,8 @@ export class MyRoom extends Room {
               "game_in_progress",
             phase:
               this.state.phase,
+            returnToLobby:
+              true,
           },
         );
 
@@ -2060,7 +2062,7 @@ export class MyRoom extends Room {
               // Transport may already be gone.
             }
           },
-          30,
+          250,
         );
 
         return;

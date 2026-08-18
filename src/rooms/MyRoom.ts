@@ -3745,6 +3745,56 @@ export class MyRoom extends Room {
     }
 
     this.updateRoomMetadata();
+
+    /*
+     * v0.10.10.238.5:
+     * A real lobby leave has no reconnect reservation. If that was the last
+     * connected transport, destroy the room instead of leaving a joinable
+     * 0 / 10 shell behind.
+     */
+    this.disposeEmptyLobbySoon();
+  }
+
+  /*
+   * v0.10.10.238.5 EMPTY LOBBY DISPOSE
+   *
+   * Active-round reconnect reservations must survive temporary browser/mobile
+   * suspension. Once the room is a lobby with no REAL connected transports,
+   * however, there is nobody to preserve and the room must be disposed.
+   *
+   * A short delay lets Colyseus settle its client collection and avoids
+   * fighting an immediate join/leave handoff.
+   */
+  private disposeEmptyLobbySoon(): void {
+    if (
+      this.state.phase !== "lobby" ||
+      this.liveSessionIds.size > 0
+    ) {
+      return;
+    }
+
+    this.syncRoomListingVisibility();
+
+    this.clock.setTimeout(
+      () => {
+        if (
+          this.state.phase !== "lobby" ||
+          this.liveSessionIds.size > 0
+        ) {
+          return;
+        }
+
+        console.log(
+          "[Color Hunt] disposing empty lobby",
+          {
+            roomId: this.roomId,
+          },
+        );
+
+        void this.disconnect();
+      },
+      300,
+    );
   }
 
   private assignRoles(): void {
@@ -4374,6 +4424,14 @@ export class MyRoom extends Room {
 
     this.updateRoomMetadata();
     this.broadcastPhaseChanged();
+
+    /*
+     * v0.10.10.238.5:
+     * A round can finish while every transport is still inside an active-round
+     * reconnect reservation. resetToLobby() removes those offline players;
+     * now dispose the resulting empty lobby as well.
+     */
+    this.disposeEmptyLobbySoon();
   }
 
   private getPaintReadyState(): {

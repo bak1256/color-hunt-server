@@ -107,13 +107,36 @@ export class MyRoom extends Room {
     new Set<string>();
 
   private syncRoomListingVisibility(): void {
+    /*
+     * v0.10.10.238.4:
+     * Room-list authority is based on REAL connected transports, never on
+     * reconnect-preserved state.players. A room with 0 live clients must
+     * always disappear from the public lobby immediately.
+     */
+    const liveCount =
+      this.liveSessionIds.size;
+
     const shouldHide =
       this.state.isPrivate ||
-      this.liveSessionIds.size === 0;
+      liveCount === 0;
 
     this.setPrivate(
       shouldHide,
     );
+
+    /*
+     * Keep metadata in agreement with listing visibility so the HTTP room
+     * list can never advertise stale "0 / 10" public entries.
+     */
+    if (
+      liveCount === 0
+    ) {
+      this.setMetadata({
+        ...(this.metadata ?? {}),
+        playerCount: 0,
+        clients: 0,
+      });
+    }
   }
 
   private readonly clientKeyBySessionId =
@@ -2051,6 +2074,16 @@ export class MyRoom extends Room {
           client.sessionId,
         );
 
+        /*
+         * v0.10.10.238.4 ZERO-PLAYER GHOST ROOM FIX
+         *
+         * The rejected mid-game invite was removed from liveSessionIds, but
+         * room-list metadata/private visibility was not refreshed afterwards.
+         * That left a public room listing alive with 0 connected players.
+         */
+        this.updateRoomMetadata();
+        this.syncRoomListingVisibility();
+
         this.clock.setTimeout(
           () => {
             try {
@@ -2061,6 +2094,14 @@ export class MyRoom extends Room {
             } catch {
               // Transport may already be gone.
             }
+
+            /*
+             * Re-check once after the transport actually closes. This covers
+             * the race where Colyseus' client collection settles after the
+             * first metadata refresh.
+             */
+            this.updateRoomMetadata();
+            this.syncRoomListingVisibility();
           },
           250,
         );

@@ -1987,6 +1987,86 @@ export class MyRoom extends Room {
         .trim()
         .slice(0, 128);
 
+    /*
+     * v0.10.10.238.1 MID-GAME JOIN GUARD
+     *
+     * Active rounds accept ONLY an identity that already belongs to this
+     * round: either an existing session with the same stable clientKey, or a
+     * still-valid reconnect snapshot for that clientKey.
+     *
+     * A completely new invite-code user must never be created as a Hider in
+     * paint/countdown/hunt. That used to corrupt role counts and round state.
+     */
+    if (this.state.phase !== "lobby") {
+      const ownsExistingRoundPlayer =
+        clientKey.length > 0 &&
+        [...this.clientKeyBySessionId.entries()]
+          .some(
+            ([
+              existingSessionId,
+              existingClientKey,
+            ]) =>
+              existingClientKey === clientKey &&
+              this.state.players.has(
+                existingSessionId,
+              ),
+          );
+
+      const reconnectSnapshot =
+        clientKey.length > 0
+          ? this.rejoinStateByClientKey.get(
+              clientKey,
+            )
+          : undefined;
+
+      const ownsReconnectSnapshot =
+        Boolean(
+          reconnectSnapshot &&
+          reconnectSnapshot.expiresAt >
+            Date.now(),
+        );
+
+      if (
+        !ownsExistingRoundPlayer &&
+        !ownsReconnectSnapshot
+      ) {
+        /*
+         * onJoin already happened at Colyseus transport level, so reject this
+         * client before PlayerState creation. Client receives a dedicated
+         * machine-readable error and remains outside the active round.
+         */
+        client.send(
+          "join_rejected",
+          {
+            reason:
+              "game_in_progress",
+            phase:
+              this.state.phase,
+          },
+        );
+
+        this.liveSessionIds.delete(
+          client.sessionId,
+        );
+
+        this.clock.setTimeout(
+          () => {
+            try {
+              client.leave(
+                4001,
+                "game_in_progress",
+              );
+            } catch {
+              // Transport may already be gone.
+            }
+          },
+          30,
+        );
+
+        return;
+      }
+    }
+
     if (clientKey) {
       for (
         const [

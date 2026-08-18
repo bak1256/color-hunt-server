@@ -2038,9 +2038,14 @@ export class MyRoom extends Room {
                   replacedPlayer.x,
                 y:
                   replacedPlayer.y,
+                /*
+                 * v0.10.10.237:
+                 * Fresh-transport fallback may happen after a browser/OS
+                 * suspended the original socket for several minutes.
+                 */
                 expiresAt:
                   Date.now() +
-                  35_000,
+                  5 * 60_000,
               },
             );
           }
@@ -2735,10 +2740,25 @@ export class MyRoom extends Room {
     }
 
     try {
-      /* V101075_RECONNECT_30S */
+      /*
+       * v0.10.10.237 BACKGROUND / TAB-SWITCH STABILITY
+       *
+       * Hider paint time is intentionally a "wait and do something else"
+       * period for Hunters. Mobile OSes and browsers may suspend a hidden tab
+       * long enough to miss WebSocket heartbeats even though the player is
+       * coming straight back.
+       *
+       * Keep the SAME Colyseus session reconnectable for five minutes instead
+       * of forcing a fresh clientKey handoff after only 30 seconds.
+       * While this promise is pending the player remains in state.players, so:
+       * - role/host ownership is preserved
+       * - the round is not aborted
+       * - paint identity is not remapped
+       * - other players are not churned by this temporary absence
+       */
       await this.allowReconnection(
         client,
-        30,
+        300,
       );
     } catch {
       /*
@@ -2955,7 +2975,7 @@ export class MyRoom extends Room {
             leavingPlayer.y,
           expiresAt:
             Date.now() +
-            35_000,
+            5 * 60_000,
         },
       );
     }

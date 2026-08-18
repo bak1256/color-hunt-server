@@ -144,6 +144,13 @@ export class MyRoom extends Room {
 
   private huntDurationMs = 80_000;
 
+  /*
+   * v0.10.10.236 RANDOM MAP ANTI-REPEAT:
+   * activeMap returns to "forest" in the lobby while RANDOM is selected, so
+   * remember the previous actual random round separately.
+   */
+  private lastRandomActiveMap = "";
+
   private readonly resultDurationMs =
     5_000;
 
@@ -1082,12 +1089,39 @@ export class MyRoom extends Room {
         this.state.selectedMap ===
           "random"
       ) {
-        this.state.activeMap =
-          `map${
+        /*
+         * Pick from all 11 maps except the map used by the immediately
+         * previous RANDOM round. This guarantees RANDOM never gives the same
+         * map twice in a row while keeping every other map equally likely.
+         */
+        const randomCandidates =
+          Array.from(
+            {
+              length: 11,
+            },
+            (
+              _,
+              index,
+            ) => `map${index + 1}`,
+          ).filter(
+            (mapName) =>
+              mapName !==
+              this.lastRandomActiveMap,
+          );
+
+        const selectedRandomMap =
+          randomCandidates[
             Math.floor(
-              Math.random() * 11,
-            ) + 1
-          }`;
+              Math.random() *
+                randomCandidates.length,
+            )
+          ] ?? "map1";
+
+        this.state.activeMap =
+          selectedRandomMap;
+
+        this.lastRandomActiveMap =
+          selectedRandomMap;
       } else {
         this.state.activeMap =
           this.state.selectedMap;

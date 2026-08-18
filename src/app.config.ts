@@ -52,7 +52,6 @@ const server = defineServer({
 
                         return (
                             room.clients > 0 &&
-                            room.locked !== true &&
                             room.private !== true &&
                             room.unlisted !== true &&
                             metadata?.isPrivate !== true &&

@@ -1605,6 +1605,37 @@ export class MyRoom extends Room {
       }
 
       this.broadcastPaintReadyState();
+
+      /*
+       * v0.10.10.240 READY CONFIRMATION PULSE:
+       * A recovering mobile session can send READY at the exact moment the
+       * replacement transport becomes authoritative. Re-send the authoritative
+       * READY state a few times so both the Hider button and Hunter counter
+       * converge without depending on one timing-sensitive broadcast.
+       * The membership Set remains the single source of truth.
+       */
+      [90, 280, 700].forEach(
+        (delay) => {
+          this.clock.setTimeout(
+            () => {
+              if (
+                this.state.phase !== "paint" ||
+                !this.state.players.has(
+                  client.sessionId,
+                ) ||
+                this.supersededSessionIds.has(
+                  client.sessionId,
+                )
+              ) {
+                return;
+              }
+
+              this.broadcastPaintReadyState();
+            },
+            delay,
+          );
+        },
+      );
     },
 
     /* V101069F_EARLY_START */

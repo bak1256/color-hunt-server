@@ -224,14 +224,15 @@ export class MyRoom extends Room {
 
   /* V1010242_HUNTER_FART_SKILL: server-authoritative comedy detector. */
   private readonly fartRadius = 150;
-  private readonly fartCost = 34;
-  private readonly fartRegenPerSecond = 7;
-  private readonly poopDurationMs = 6_000;
+  /* V1010247_FART_ULTIMATE_BALANCE: GAS is now danger/pressure, not remaining fuel. */
+  private readonly fartCost = 36;
+  private readonly fartRegenPerSecond = 0.75;
+  private readonly poopDurationMs = 14_000;
   private readonly fartGaugeByHunter = new Map<string, number>();
   private readonly fartGaugeUpdatedAt = new Map<string, number>();
   private readonly poopUntilByHunter = new Map<string, number>();
   private readonly lastFartStateSentAt = new Map<string, number>();
-  private readonly lastPoopLaughAt = new Map<string, number>();
+  private readonly poopLaughTriggeredHunters = new Set<string>();
 
 
   private readonly heatPerShot = 34;
@@ -1224,27 +1225,70 @@ export class MyRoom extends Room {
         return;
       }
 
-      const gauge = this.getUpdatedFartGauge(client.sessionId, now);
-      if (gauge < this.fartCost) {
-        const poopUntil = now + this.poopDurationMs;
-        this.fartGaugeByHunter.set(client.sessionId, 0);
-        this.fartGaugeUpdatedAt.set(client.sessionId, now);
-        this.poopUntilByHunter.set(client.sessionId, poopUntil);
+      const gauge = this.getUpdatedFartGauge(
+        client.sessionId,
+        now,
+      );
+      const nextGauge =
+        gauge +
+        this.fartCost;
+
+      /*
+       * Crossing MAX causes the accident immediately.
+       * Rapid use: 0 -> 36 -> 72 -> 108 = poop on the third attempt.
+       */
+      if (nextGauge >= 100) {
+        const poopUntil =
+          now +
+          this.poopDurationMs;
+
+        this.fartGaugeByHunter.set(
+          client.sessionId,
+          100,
+        );
+        this.fartGaugeUpdatedAt.set(
+          client.sessionId,
+          now,
+        );
+        this.poopUntilByHunter.set(
+          client.sessionId,
+          poopUntil,
+        );
+        this.poopLaughTriggeredHunters.delete(
+          client.sessionId,
+        );
+
         this.broadcast('poop_burst', {
           hunterId: client.sessionId,
+          hunterName: hunter.name,
           x: hunter.x,
           y: hunter.y,
           poopUntil,
           serverNow: now,
         });
-        this.sendFartState(client, now);
+
+        this.sendFartState(
+          client,
+          now,
+        );
         return;
       }
 
-      const nextGauge = gauge - this.fartCost;
-      this.fartGaugeByHunter.set(client.sessionId, nextGauge);
-      this.fartGaugeUpdatedAt.set(client.sessionId, now);
-      const soundTier = gauge > 66 ? 3 : gauge > 34 ? 2 : 1;
+      this.fartGaugeByHunter.set(
+        client.sessionId,
+        nextGauge,
+      );
+      this.fartGaugeUpdatedAt.set(
+        client.sessionId,
+        now,
+      );
+
+      const soundTier =
+        nextGauge >= 72
+          ? 3
+          : nextGauge >= 36
+            ? 2
+            : 1;
 
       this.broadcast('fart_burst', {
         hunterId: client.sessionId,
@@ -2027,21 +2071,27 @@ export class MyRoom extends Room {
 
 
   /* V1010242_HUNTER_FART_SKILL */
+  /* V1010247_FART_ULTIMATE_BALANCE */
   private getUpdatedFartGauge(
     sessionId: string,
     now = Date.now(),
   ): number {
     const previous =
-      this.fartGaugeByHunter.get(sessionId) ?? 100;
+      this.fartGaugeByHunter.get(sessionId) ?? 0;
     const updatedAt =
       this.fartGaugeUpdatedAt.get(sessionId) ?? now;
     const elapsedSeconds =
       Math.max(0, now - updatedAt) / 1000;
+
+    /*
+     * Danger slowly cools DOWN. At 0.75/sec it takes ~48 seconds to
+     * erase one +36 fart, so this is a panic button rather than a scanner.
+     */
     const next = Math.max(
       0,
       Math.min(
         100,
-        previous + elapsedSeconds * this.fartRegenPerSecond,
+        previous - elapsedSeconds * this.fartRegenPerSecond,
       ),
     );
     this.fartGaugeByHunter.set(sessionId, next);
@@ -2092,37 +2142,73 @@ export class MyRoom extends Room {
       if (poopUntil <= now) {
         if (poopUntil > 0) {
           this.poopUntilByHunter.delete(client.sessionId);
+          this.poopLaughTriggeredHunters.delete(client.sessionId);
           this.sendFartState(client, now);
         }
         return;
       }
 
+      /*
+       * One poop accident = one laugh total.
+       * The first living Hider entering the radius gets the laugh reaction;
+       * no repeated HAHAHA loop for the same accident.
+       */
+      if (
+        this.poopLaughTriggeredHunters.has(
+          client.sessionId,
+        )
+      ) {
+        return;
+      }
+
+      let laughingHider:
+        {
+          id: string;
+          x: number;
+          y: number;
+        } |
+        undefined;
+
       this.state.players.forEach((hider, hiderId) => {
-        if (hider.role !== 'hider' || !hider.alive) {
+        if (
+          laughingHider ||
+          hider.role !== 'hider' ||
+          !hider.alive
+        ) {
           return;
         }
+
         const distance = Math.hypot(
           hunter.x - hider.x,
           hunter.y - hider.y,
         );
-        if (distance > this.fartRadius) {
-          return;
+
+        if (distance <= this.fartRadius) {
+          laughingHider = {
+            id: hiderId,
+            x: hider.x,
+            y: hider.y,
+          };
         }
-        const key = client.sessionId + ':' + hiderId;
-        const previousLaugh = this.lastPoopLaughAt.get(key) ?? 0;
-        if (now - previousLaugh < 1400) {
-          return;
-        }
-        this.lastPoopLaughAt.set(key, now);
-        this.broadcast('hider_laugh', {
-          hunterId: client.sessionId,
-          hiderId,
-          x: hider.x,
-          y: hider.y,
-        });
-        client.send('fart_detected', {
-          reaction: 'laugh',
-        });
+      });
+
+      if (!laughingHider) {
+        return;
+      }
+
+      this.poopLaughTriggeredHunters.add(
+        client.sessionId,
+      );
+
+      this.broadcast('hider_laugh', {
+        hunterId: client.sessionId,
+        hiderId: laughingHider.id,
+        x: laughingHider.x,
+        y: laughingHider.y,
+      });
+
+      client.send('fart_detected', {
+        reaction: 'laugh',
       });
     });
   }

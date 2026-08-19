@@ -3767,6 +3767,7 @@ const gauge =
     }
   }
 
+  /* V1010295_ALL_PHASE_RECONNECT: every phase gets transport recovery + authoritative replay. */
   async onDrop(
     client: Client,
     code: number,
@@ -3798,15 +3799,11 @@ const gauge =
       },
     );
 
-    /* V101073_LOBBY_DROP_CLEANUP */
-    if (this.state.phase === "lobby") {
-      this.onLeave(
-        client,
-        code as CloseCode,
-      );
-      return;
-    }
-
+    /*
+     * V1010295_ALL_PHASE_RECONNECT: Lobby is a phase too. Do not immediately destroy the player on a
+     * temporary mobile transport drop. The common allowReconnection() below
+     * now protects lobby/countdown/paint/hunt/finished uniformly.
+     */
     /*
      * v0.10.10.238:
      * onDrop is the authoritative start signal. Browser blur/hidden alone is
@@ -3993,6 +3990,43 @@ const gauge =
       this.sendPaintReadyState(client);
     }
 
+    if (
+      this.state.phase === "finished" &&
+      (
+        this.state.winner === "hunters" ||
+        this.state.winner === "hiders"
+      )
+    ) {
+      const revealedHiders =
+        [...this.state.players.entries()]
+          .filter(
+            ([, player]) =>
+              player.role === "hider",
+          )
+          .map(
+            ([sessionId, player]) => ({
+              sessionId,
+              x: player.x,
+              y: player.y,
+            }),
+          );
+
+      client.send(
+        "round_result",
+        {
+          winner:
+            this.state.winner,
+          revealedHiders,
+          durationMs:
+            Math.max(
+              0,
+              this.state.phaseEndsAt -
+                Date.now(),
+            ),
+        },
+      );
+    }
+
     /* V101077_RECONNECT_MULTI_PULSE */
     [80, 220, 650].forEach(
       (delay) => {
@@ -4005,6 +4039,18 @@ const gauge =
             ) {
               this.sendLobbySnapshot(
                 client,
+              );
+
+              client.send(
+                "phase_changed",
+                {
+                  phase:
+                    this.state.phase,
+                  phaseEndsAt:
+                    this.state.phaseEndsAt,
+                  serverNow:
+                    Date.now(),
+                },
               );
 
               if (

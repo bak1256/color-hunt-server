@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010285_AVATAR_PRESET_FULL_POINTS: keep complete lobby avatar paint when broadcasting to waiting room. */
   /* V1010282_FART_RADIUS_110: authoritative 360-degree fart detection radius = 110. */
   maxClients = 10;
   state = new MyRoomState();
@@ -426,7 +427,7 @@ export class MyRoom extends Room {
                   ? stroke.points
                   : []
               )
-                .slice(0, 240)
+                .slice(0, 600)
                 .map(
                   (point: any) => ({
                     x:

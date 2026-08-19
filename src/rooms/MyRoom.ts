@@ -358,7 +358,7 @@ export class MyRoom extends Room {
 
       const strokes =
         rawStrokes
-          .slice(0, 80)
+          .slice(0, 120) /* V101023837_SERVER_PAINT_STABILITY: preserve full editor preset */
           .map((stroke: any) => {
             const color =
               Math.max(
@@ -512,9 +512,13 @@ export class MyRoom extends Room {
         );
 
       /* V101094_RESTORE_LOCAL_PAINT_FINAL */
+      /* V101023837_SERVER_PAINT_STABILITY: both paint roles may restore camouflage after reconnect. */
       if (
         !player ||
-        player.role !== "hunter"
+        (
+          player.role !== "hunter" &&
+          player.role !== "hider"
+        )
       ) {
         return;
       }
@@ -2740,20 +2744,20 @@ export class MyRoom extends Room {
                 return;
               }
 
-              this.clients.forEach(
-                (connectedClient) => {
-                  this.sendLobbySnapshot(
-                    connectedClient,
-                  );
+              /*
+               * V101023837_SERVER_PAINT_STABILITY: full recovery state is needed only by the reconnecting
+               * client. Existing clients already receive targeted paint replay.
+               */
+              this.sendLobbySnapshot(
+                client,
+              );
 
-                  connectedClient.send(
-                    "round_paint_state",
-                    {
-                      strokes:
-                        [...this.roundPaintStrokes.values()]
-                          .flat(),
-                    },
-                  );
+              client.send(
+                "round_paint_state",
+                {
+                  strokes:
+                    [...this.roundPaintStrokes.values()]
+                      .flat(),
                 },
               );
             },

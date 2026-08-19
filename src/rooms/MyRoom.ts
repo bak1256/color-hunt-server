@@ -227,7 +227,7 @@ export class MyRoom extends Room {
   /* V1010247_FART_ULTIMATE_BALANCE: GAS is now danger/pressure, not remaining fuel. */
   private readonly fartCost = 36;
   private readonly fartRegenPerSecond = 0.75;
-  private readonly poopDurationMs = 14_000;
+  private readonly poopDurationMs = 10_000;
   private readonly fartGaugeByHunter = new Map<string, number>();
   private readonly fartGaugeUpdatedAt = new Map<string, number>();
   private readonly poopUntilByHunter = new Map<string, number>();
@@ -2147,6 +2147,7 @@ export class MyRoom extends Room {
 
   /* V1010242_HUNTER_FART_SKILL */
   /* V1010247_FART_ULTIMATE_BALANCE */
+  /* V1010277_GAS_10S_LINEAR_DRAIN: 10s accident + authoritative linear GAS drain. */
   /* V1010261_THIRD_FART_DETECT_FIRST */
   /* V1010266_SERVER_POOP_DETECTED_FLAG */
   /* V1010254_RESET_FART_EACH_ROUND */
@@ -2156,24 +2157,72 @@ export class MyRoom extends Room {
   ): number {
     const previous =
       this.fartGaugeByHunter.get(sessionId) ?? 0;
+
     const updatedAt =
       this.fartGaugeUpdatedAt.get(sessionId) ?? now;
-    const elapsedSeconds =
-      Math.max(0, now - updatedAt) / 1000;
 
-    /*
-     * Danger slowly cools DOWN. At 0.75/sec it takes ~48 seconds to
-     * erase one +36 fart, so this is a panic button rather than a scanner.
-     */
-    const next = Math.max(
-      0,
-      Math.min(
-        100,
-        previous - elapsedSeconds * this.fartRegenPerSecond,
-      ),
+    const poopUntil =
+      this.poopUntilByHunter.get(sessionId) ?? 0;
+
+    let next: number;
+
+    if (poopUntil > 0) {
+      /*
+       * V1010277_GAS_10S_LINEAR_DRAIN: while the accident exists, GAS is the debuff countdown itself.
+       * This exactly mirrors Practice:
+       * 10.0s remaining = 100%, 5.0s = 50%, 0s = 0%.
+       *
+       * updateFartSkillSystem() calls this BEFORE deleting an expired
+       * poopUntil, so the final authoritative state is guaranteed to hit 0.
+       */
+      const remainingMs =
+        Math.max(
+          0,
+          poopUntil - now,
+        );
+
+      next =
+        Math.max(
+          0,
+          Math.min(
+            100,
+            (
+              remainingMs /
+              this.poopDurationMs
+            ) *
+              100,
+          ),
+        );
+    } else {
+      const elapsedSeconds =
+        Math.max(
+          0,
+          now - updatedAt,
+        ) /
+        1000;
+
+      next =
+        Math.max(
+          0,
+          Math.min(
+            100,
+            previous -
+              elapsedSeconds *
+                this.fartRegenPerSecond,
+          ),
+        );
+    }
+
+    this.fartGaugeByHunter.set(
+      sessionId,
+      next,
     );
-    this.fartGaugeByHunter.set(sessionId, next);
-    this.fartGaugeUpdatedAt.set(sessionId, now);
+
+    this.fartGaugeUpdatedAt.set(
+      sessionId,
+      now,
+    );
+
     return next;
   }
 

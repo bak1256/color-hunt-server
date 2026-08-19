@@ -1388,6 +1388,10 @@ export class MyRoom extends Room {
             poopUntil,
             serverNow:
               now,
+            /*
+             * V1010266_SERVER_POOP_DETECTED_FLAG: client must not infer combo from message timing.
+             */
+            detected,
           },
         );
       }
@@ -2144,6 +2148,7 @@ export class MyRoom extends Room {
   /* V1010242_HUNTER_FART_SKILL */
   /* V1010247_FART_ULTIMATE_BALANCE */
   /* V1010261_THIRD_FART_DETECT_FIRST */
+  /* V1010266_SERVER_POOP_DETECTED_FLAG */
   /* V1010254_RESET_FART_EACH_ROUND */
   private getUpdatedFartGauge(
     sessionId: string,

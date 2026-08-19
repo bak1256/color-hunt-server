@@ -2114,6 +2114,13 @@ export class MyRoom extends Room {
       }
     }
 
+    /*
+     * V101023840_MOBILE_RECONNECT_CONVERGENCE
+     * A fresh mobile fallback gets a new sessionId. Preserve READY ownership
+     * across that identity replacement.
+     */
+    let inheritedPaintReady = false;
+
     if (clientKey) {
       for (
         const [
@@ -2217,6 +2224,11 @@ export class MyRoom extends Room {
           this.hunterRoundStats.delete(
             existingSessionId,
           );
+          inheritedPaintReady =
+            this.paintReadySessionIds.has(
+              existingSessionId,
+            );
+
           this.paintReadySessionIds.delete(
             existingSessionId,
           );
@@ -2601,6 +2613,26 @@ export class MyRoom extends Room {
       client.sessionId,
     );
 
+    /*
+     * V101023840_MOBILE_RECONNECT_CONVERGENCE
+     * Session replacement is now complete. Transfer READY only for an active,
+     * living Hider and immediately publish the authoritative count.
+     */
+    if (
+      this.state.phase === "paint" &&
+      player.role === "hider" &&
+      player.alive &&
+      inheritedPaintReady
+    ) {
+      this.paintReadySessionIds.add(
+        client.sessionId,
+      );
+    }
+
+    if (this.state.phase === "paint") {
+      this.broadcastPaintReadyState();
+    }
+
     /* V101090_SAFE_EXISTING_PAINT_STROKE_REPLAY */
     if (
       options.reconnectFallback === true &&
@@ -2817,19 +2849,49 @@ export class MyRoom extends Room {
         },
       );
 
-      this.clock.setTimeout(
-        () => {
-          if (
-            this.clients.includes(
-              client,
-            )
-          ) {
-            this.sendLobbySnapshot(
-              client,
-            );
-          }
+      [120, 420, 900, 1800].forEach(
+        (delay) => {
+          this.clock.setTimeout(
+            () => {
+              if (
+                !this.clients.includes(
+                  client,
+                ) ||
+                !this.state.players.has(
+                  client.sessionId,
+                )
+              ) {
+                return;
+              }
+
+              this.sendLobbySnapshot(
+                client,
+              );
+
+              client.send(
+                "phase_changed",
+                {
+                  phase:
+                    this.state.phase,
+                  phaseEndsAt:
+                    this.state.phaseEndsAt,
+                  serverNow:
+                    Date.now(),
+                },
+              );
+
+              if (
+                this.state.phase ===
+                  "paint"
+              ) {
+                this.sendPaintReadyState(
+                  client,
+                );
+              }
+            },
+            delay,
+          );
         },
-        120,
       );
     }
 

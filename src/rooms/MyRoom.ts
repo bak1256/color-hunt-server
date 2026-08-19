@@ -43,6 +43,10 @@ type HunterAimMessage = {
   angle?: number;
 };
 
+type FartUseMessage = {
+  pressedAt?: number;
+};
+
 type BrushShape =
   | "dotCircle"
   | "circle"
@@ -217,6 +221,17 @@ export class MyRoom extends Room {
   private lastPaintReadyPulseAt = 0;
 
   private readonly maxHunterReserve = 12;
+
+  /* V1010242_HUNTER_FART_SKILL: server-authoritative comedy detector. */
+  private readonly fartRadius = 150;
+  private readonly fartCost = 34;
+  private readonly fartRegenPerSecond = 7;
+  private readonly poopDurationMs = 6_000;
+  private readonly fartGaugeByHunter = new Map<string, number>();
+  private readonly fartGaugeUpdatedAt = new Map<string, number>();
+  private readonly poopUntilByHunter = new Map<string, number>();
+  private readonly lastFartStateSentAt = new Map<string, number>();
+  private readonly lastPoopLaughAt = new Map<string, number>();
 
 
   private readonly heatPerShot = 34;
@@ -1189,6 +1204,85 @@ export class MyRoom extends Room {
       this.startCountdownPhase();
     },
 
+
+    fart_use: (
+      client: Client,
+      _message: FartUseMessage,
+    ): void => {
+      if (this.state.phase !== 'hunt') {
+        return;
+      }
+      const hunter = this.state.players.get(client.sessionId);
+      if (!hunter || hunter.role !== 'hunter' || !hunter.alive) {
+        return;
+      }
+
+      const now = Date.now();
+      const existingPoopUntil =
+        this.poopUntilByHunter.get(client.sessionId) ?? 0;
+      if (existingPoopUntil > now) {
+        return;
+      }
+
+      const gauge = this.getUpdatedFartGauge(client.sessionId, now);
+      if (gauge < this.fartCost) {
+        const poopUntil = now + this.poopDurationMs;
+        this.fartGaugeByHunter.set(client.sessionId, 0);
+        this.fartGaugeUpdatedAt.set(client.sessionId, now);
+        this.poopUntilByHunter.set(client.sessionId, poopUntil);
+        this.broadcast('poop_burst', {
+          hunterId: client.sessionId,
+          x: hunter.x,
+          y: hunter.y,
+          poopUntil,
+          serverNow: now,
+        });
+        this.sendFartState(client, now);
+        return;
+      }
+
+      const nextGauge = gauge - this.fartCost;
+      this.fartGaugeByHunter.set(client.sessionId, nextGauge);
+      this.fartGaugeUpdatedAt.set(client.sessionId, now);
+      const soundTier = gauge > 66 ? 3 : gauge > 34 ? 2 : 1;
+
+      this.broadcast('fart_burst', {
+        hunterId: client.sessionId,
+        x: hunter.x,
+        y: hunter.y,
+        radius: this.fartRadius,
+        soundTier,
+      });
+
+      let detected = false;
+      this.state.players.forEach((hider, hiderId) => {
+        if (hider.role !== 'hider' || !hider.alive) {
+          return;
+        }
+        const distance = Math.hypot(
+          hunter.x - hider.x,
+          hunter.y - hider.y,
+        );
+        if (distance > this.fartRadius) {
+          return;
+        }
+        detected = true;
+        this.broadcast('hider_cough', {
+          hunterId: client.sessionId,
+          hiderId,
+          x: hider.x,
+          y: hider.y,
+        });
+      });
+
+      if (detected) {
+        client.send('fart_detected', {
+          reaction: 'cough',
+        });
+      }
+      this.sendFartState(client, now);
+    },
+
     hunter_aim: (
       client: Client,
       message: HunterAimMessage,
@@ -1932,6 +2026,107 @@ export class MyRoom extends Room {
   }
 
 
+  /* V1010242_HUNTER_FART_SKILL */
+  private getUpdatedFartGauge(
+    sessionId: string,
+    now = Date.now(),
+  ): number {
+    const previous =
+      this.fartGaugeByHunter.get(sessionId) ?? 100;
+    const updatedAt =
+      this.fartGaugeUpdatedAt.get(sessionId) ?? now;
+    const elapsedSeconds =
+      Math.max(0, now - updatedAt) / 1000;
+    const next = Math.max(
+      0,
+      Math.min(
+        100,
+        previous + elapsedSeconds * this.fartRegenPerSecond,
+      ),
+    );
+    this.fartGaugeByHunter.set(sessionId, next);
+    this.fartGaugeUpdatedAt.set(sessionId, now);
+    return next;
+  }
+
+  private sendFartState(
+    client: Client,
+    now = Date.now(),
+  ): void {
+    const gauge = this.getUpdatedFartGauge(
+      client.sessionId,
+      now,
+    );
+    const poopUntil =
+      this.poopUntilByHunter.get(client.sessionId) ?? 0;
+    client.send('fart_state', {
+      gauge,
+      poopUntil,
+      serverNow: now,
+      radius: this.fartRadius,
+    });
+  }
+
+  private updateFartSkillSystem(): void {
+    if (this.state.phase !== 'hunt') {
+      return;
+    }
+
+    const now = Date.now();
+    this.clients.forEach((client) => {
+      const hunter = this.state.players.get(client.sessionId);
+      if (!hunter || hunter.role !== 'hunter' || !hunter.alive) {
+        return;
+      }
+
+      this.getUpdatedFartGauge(client.sessionId, now);
+      const lastState =
+        this.lastFartStateSentAt.get(client.sessionId) ?? 0;
+      if (now - lastState >= 250) {
+        this.lastFartStateSentAt.set(client.sessionId, now);
+        this.sendFartState(client, now);
+      }
+
+      const poopUntil =
+        this.poopUntilByHunter.get(client.sessionId) ?? 0;
+      if (poopUntil <= now) {
+        if (poopUntil > 0) {
+          this.poopUntilByHunter.delete(client.sessionId);
+          this.sendFartState(client, now);
+        }
+        return;
+      }
+
+      this.state.players.forEach((hider, hiderId) => {
+        if (hider.role !== 'hider' || !hider.alive) {
+          return;
+        }
+        const distance = Math.hypot(
+          hunter.x - hider.x,
+          hunter.y - hider.y,
+        );
+        if (distance > this.fartRadius) {
+          return;
+        }
+        const key = client.sessionId + ':' + hiderId;
+        const previousLaugh = this.lastPoopLaughAt.get(key) ?? 0;
+        if (now - previousLaugh < 1400) {
+          return;
+        }
+        this.lastPoopLaughAt.set(key, now);
+        this.broadcast('hider_laugh', {
+          hunterId: client.sessionId,
+          hiderId,
+          x: hider.x,
+          y: hider.y,
+        });
+        client.send('fart_detected', {
+          reaction: 'laugh',
+        });
+      });
+    });
+  }
+
   onCreate(
     options: JoinOptions,
   ): void {
@@ -1944,6 +2139,7 @@ export class MyRoom extends Room {
     this.setSimulationInterval(
       () => {
         this.checkPhaseDeadline();
+        this.updateFartSkillSystem();
 
         /* V101072_READY_PERIODIC_PULSE */
         if (

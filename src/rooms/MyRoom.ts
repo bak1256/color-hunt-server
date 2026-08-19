@@ -226,6 +226,13 @@ export class MyRoom extends Room {
   private readonly fartRadius = 150;
   /* V1010247_FART_ULTIMATE_BALANCE: GAS is now danger/pressure, not remaining fuel. */
   private readonly fartCost = 36;
+  /*
+   * V1010281_FART_SERVER_COOLDOWN: authoritative anti-spam cadence.
+   * Client also throttles for UX, but the server is the final guard.
+   */
+  private readonly fartUseCooldownMs = 900;
+  private readonly lastFartUseAtByHunter =
+    new Map<string, number>();
   private readonly fartRegenPerSecond = 0.75;
   private readonly poopDurationMs = 8_000;
   private readonly fartGaugeByHunter = new Map<string, number>();
@@ -1246,7 +1253,30 @@ export class MyRoom extends Room {
         return;
       }
 
-      const gauge =
+      
+      const previousFartUseAt =
+        this.lastFartUseAtByHunter.get(
+          client.sessionId,
+        ) ?? 0;
+
+      if (
+        now -
+          previousFartUseAt <
+        this.fartUseCooldownMs
+      ) {
+        return;
+      }
+
+      /*
+       * Record before gauge calculation so duplicate/rapid packets cannot
+       * consume multiple GAS charges in the same burst.
+       */
+      this.lastFartUseAtByHunter.set(
+        client.sessionId,
+        now,
+      );
+
+const gauge =
         this.getUpdatedFartGauge(
           client.sessionId,
           now,
@@ -2147,6 +2177,7 @@ export class MyRoom extends Room {
 
   /* V1010242_HUNTER_FART_SKILL */
   /* V1010247_FART_ULTIMATE_BALANCE */
+  /* V1010281_FART_SERVER_COOLDOWN: authoritative 900ms fart cadence. */
   /* V1010277_GAS_10S_LINEAR_DRAIN: 10s accident + authoritative linear GAS drain. */
   /* V1010278_GAS_8S: authoritative accident duration = 8s. */
   /* V1010261_THIRD_FART_DETECT_FIRST */
@@ -4431,6 +4462,7 @@ export class MyRoom extends Room {
      */
     this.fartGaugeByHunter.clear();
     this.fartGaugeUpdatedAt.clear();
+    this.lastFartUseAtByHunter.clear();
     this.poopUntilByHunter.clear();
     this.poopLaughTriggeredHunters.clear();
 

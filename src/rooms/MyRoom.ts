@@ -227,7 +227,7 @@ export class MyRoom extends Room {
   /* V1010247_FART_ULTIMATE_BALANCE: GAS is now danger/pressure, not remaining fuel. */
   private readonly fartCost = 36;
   private readonly fartRegenPerSecond = 0.75;
-  private readonly poopDurationMs = 10_000;
+  private readonly poopDurationMs = 8_000;
   private readonly fartGaugeByHunter = new Map<string, number>();
   private readonly fartGaugeUpdatedAt = new Map<string, number>();
   private readonly poopUntilByHunter = new Map<string, number>();
@@ -2148,6 +2148,7 @@ export class MyRoom extends Room {
   /* V1010242_HUNTER_FART_SKILL */
   /* V1010247_FART_ULTIMATE_BALANCE */
   /* V1010277_GAS_10S_LINEAR_DRAIN: 10s accident + authoritative linear GAS drain. */
+  /* V1010278_GAS_8S: authoritative accident duration = 8s. */
   /* V1010261_THIRD_FART_DETECT_FIRST */
   /* V1010266_SERVER_POOP_DETECTED_FLAG */
   /* V1010254_RESET_FART_EACH_ROUND */

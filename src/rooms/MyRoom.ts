@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010297B_POST_ROUND_RECONNECT_RESTORE_RECOVER: recover a reserved player whose Schema actor was removed at round reset. */
   /* V1010285_AVATAR_PRESET_FULL_POINTS: keep complete lobby avatar paint when broadcasting to waiting room. */
   /* V1010282_FART_RADIUS_110: authoritative 360-degree fart detection radius = 110. */
   maxClients = 10;
@@ -147,6 +148,22 @@ export class MyRoom extends Room {
 
   private readonly clientKeyBySessionId =
     new Map<string, string>();
+
+  /*
+   * V1010297B_POST_ROUND_RECONNECT_RESTORE_RECOVER
+   * Preserve identity for a player removed by Finished -> Lobby while
+   * its Colyseus reconnection reservation is still alive.
+   */
+  private readonly postRoundReconnectBySessionId =
+    new Map<
+      string,
+      {
+        name: string;
+        clientKey: string;
+        avatar: any[];
+        expiresAt: number;
+      }
+    >();
 
   private readonly rejoinStateByClientKey =
     new Map<
@@ -3879,9 +3896,6 @@ const gauge =
     if (
       this.supersededSessionIds.has(
         client.sessionId,
-      ) ||
-      !this.state.players.has(
-        client.sessionId,
       )
     ) {
       this.liveSessionIds.delete(
@@ -3891,13 +3905,126 @@ const gauge =
       this.syncRoomListingVisibility();
 
       console.warn(
-        "[Chameleon Hunt] ignored stale reconnect",
+        "[Chameleon Hunt] ignored superseded reconnect",
         {
           sessionId:
             client.sessionId,
         },
       );
       return;
+    }
+
+    if (
+      !this.state.players.has(
+        client.sessionId,
+      )
+    ) {
+      const recovery =
+        this.postRoundReconnectBySessionId.get(
+          client.sessionId,
+        );
+
+      if (
+        this.state.phase !== "lobby" ||
+        !recovery ||
+        recovery.expiresAt <=
+          Date.now()
+      ) {
+        this.liveSessionIds.delete(
+          client.sessionId,
+        );
+        this.updateRoomMetadata();
+        this.syncRoomListingVisibility();
+
+        console.warn(
+          "[Chameleon Hunt] ignored stale reconnect",
+          {
+            sessionId:
+              client.sessionId,
+            phase:
+              this.state.phase,
+          },
+        );
+        return;
+      }
+
+      const restoredPlayer =
+        new PlayerState();
+
+      restoredPlayer.name =
+        recovery.name ||
+        "Player";
+      restoredPlayer.role =
+        "hider";
+      restoredPlayer.hunterVolunteer =
+        false;
+      restoredPlayer.alive =
+        true;
+
+      const lobbyPosition =
+        this.getRandomLobbyPosition();
+
+      restoredPlayer.x =
+        lobbyPosition.x;
+      restoredPlayer.y =
+        lobbyPosition.y;
+
+      this.state.players.set(
+        client.sessionId,
+        restoredPlayer,
+      );
+
+      if (
+        recovery.clientKey
+      ) {
+        this.clientKeyBySessionId.set(
+          client.sessionId,
+          recovery.clientKey,
+        );
+      }
+
+      if (
+        Array.isArray(
+          recovery.avatar,
+        ) &&
+        recovery.avatar.length >
+          0
+      ) {
+        this.lobbyAvatarPresets.set(
+          client.sessionId,
+          recovery.avatar,
+        );
+      }
+
+      this.postRoundReconnectBySessionId.delete(
+        client.sessionId,
+      );
+
+      this.weaponHeatStates.set(
+        client.sessionId,
+        {
+          heat: 0,
+          updatedAt:
+            Date.now(),
+          overheatedUntil:
+            0,
+        },
+      );
+
+      this.noHunterGraceGeneration +=
+        1;
+
+      this.ensureValidHost();
+
+      console.log(
+        "[Chameleon Hunt] restored post-round lobby reconnect",
+        {
+          sessionId:
+            client.sessionId,
+          players:
+            this.state.players.size,
+        },
+      );
     }
 
     this.liveSessionIds.add(
@@ -4974,6 +5101,32 @@ const gauge =
         )
       ) {
         continue;
+      }
+
+      const disconnectedPlayer =
+        this.state.players.get(
+          sessionId,
+        );
+
+      if (disconnectedPlayer) {
+        this.postRoundReconnectBySessionId.set(
+          sessionId,
+          {
+            name:
+              disconnectedPlayer.name,
+            clientKey:
+              this.clientKeyBySessionId.get(
+                sessionId,
+              ) ?? "",
+            avatar:
+              this.lobbyAvatarPresets.get(
+                sessionId,
+              ) ?? [],
+            expiresAt:
+              Date.now() +
+              5 * 60_000,
+          },
+        );
       }
 
       this.state.players.delete(

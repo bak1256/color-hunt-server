@@ -1210,121 +1210,192 @@ export class MyRoom extends Room {
       client: Client,
       _message: FartUseMessage,
     ): void => {
-      if (this.state.phase !== 'hunt') {
-        return;
-      }
-      const hunter = this.state.players.get(client.sessionId);
-      if (!hunter || hunter.role !== 'hunter' || !hunter.alive) {
+      if (
+        this.state.phase !==
+        'hunt'
+      ) {
         return;
       }
 
-      const now = Date.now();
+      const hunter =
+        this.state.players.get(
+          client.sessionId,
+        );
+
+      if (
+        !hunter ||
+        hunter.role !==
+          'hunter' ||
+        !hunter.alive
+      ) {
+        return;
+      }
+
+      const now =
+        Date.now();
+
       const existingPoopUntil =
-        this.poopUntilByHunter.get(client.sessionId) ?? 0;
-      if (existingPoopUntil > now) {
+        this.poopUntilByHunter.get(
+          client.sessionId,
+        ) ?? 0;
+
+      if (
+        existingPoopUntil >
+        now
+      ) {
         return;
       }
 
-      const gauge = this.getUpdatedFartGauge(
-        client.sessionId,
-        now,
-      );
+      const gauge =
+        this.getUpdatedFartGauge(
+          client.sessionId,
+          now,
+        );
+
       const nextGauge =
         gauge +
         this.fartCost;
 
-      /*
-       * Crossing MAX causes the accident immediately.
-       * Rapid use: 0 -> 36 -> 72 -> 108 = poop on the third attempt.
-       */
-      if (nextGauge >= 100) {
-        const poopUntil =
-          now +
-          this.poopDurationMs;
+      const willPoop =
+        nextGauge >= 100;
 
-        this.fartGaugeByHunter.set(
-          client.sessionId,
+      const appliedGauge =
+        Math.min(
           100,
+          nextGauge,
         );
-        this.fartGaugeUpdatedAt.set(
-          client.sessionId,
-          now,
-        );
-        this.poopUntilByHunter.set(
-          client.sessionId,
-          poopUntil,
-        );
-        this.poopLaughTriggeredHunters.delete(
-          client.sessionId,
-        );
-
-        this.broadcast('poop_burst', {
-          hunterId: client.sessionId,
-          hunterName: hunter.name,
-          x: hunter.x,
-          y: hunter.y,
-          poopUntil,
-          serverNow: now,
-        });
-
-        this.sendFartState(
-          client,
-          now,
-        );
-        return;
-      }
 
       this.fartGaugeByHunter.set(
         client.sessionId,
-        nextGauge,
+        appliedGauge,
       );
+
       this.fartGaugeUpdatedAt.set(
         client.sessionId,
         now,
       );
 
       const soundTier =
-        nextGauge >= 72
+        appliedGauge >= 72
           ? 3
-          : nextGauge >= 36
+          : appliedGauge >= 36
             ? 2
             : 1;
 
-      this.broadcast('fart_burst', {
-        hunterId: client.sessionId,
-        x: hunter.x,
-        y: hunter.y,
-        radius: this.fartRadius,
-        soundTier,
-      });
+      /*
+       * Third press is still a real fart.
+       * Burst + Hider cough + Hunter ! happen BEFORE the accident.
+       */
+      this.broadcast(
+        'fart_burst',
+        {
+          hunterId:
+            client.sessionId,
+          x:
+            hunter.x,
+          y:
+            hunter.y,
+          radius:
+            this.fartRadius,
+          soundTier,
+        },
+      );
 
-      let detected = false;
-      this.state.players.forEach((hider, hiderId) => {
-        if (hider.role !== 'hider' || !hider.alive) {
-          return;
-        }
-        const distance = Math.hypot(
-          hunter.x - hider.x,
-          hunter.y - hider.y,
-        );
-        if (distance > this.fartRadius) {
-          return;
-        }
-        detected = true;
-        this.broadcast('hider_cough', {
-          hunterId: client.sessionId,
+      let detected =
+        false;
+
+      this.state.players.forEach(
+        (
+          hider,
           hiderId,
-          x: hider.x,
-          y: hider.y,
-        });
-      });
+        ) => {
+          if (
+            hider.role !==
+              'hider' ||
+            !hider.alive
+          ) {
+            return;
+          }
+
+          const distance =
+            Math.hypot(
+              hunter.x -
+                hider.x,
+              hunter.y -
+                hider.y,
+            );
+
+          if (
+            distance >
+            this.fartRadius
+          ) {
+            return;
+          }
+
+          detected =
+            true;
+
+          this.broadcast(
+            'hider_cough',
+            {
+              hunterId:
+                client.sessionId,
+              hiderId,
+              x:
+                hider.x,
+              y:
+                hider.y,
+            },
+          );
+        },
+      );
 
       if (detected) {
-        client.send('fart_detected', {
-          reaction: 'cough',
-        });
+        client.send(
+          'fart_detected',
+          {
+            reaction:
+              'cough',
+          },
+        );
       }
-      this.sendFartState(client, now);
+
+      if (willPoop) {
+        const poopUntil =
+          now +
+          this.poopDurationMs;
+
+        this.poopUntilByHunter.set(
+          client.sessionId,
+          poopUntil,
+        );
+
+        this.poopLaughTriggeredHunters.delete(
+          client.sessionId,
+        );
+
+        this.broadcast(
+          'poop_burst',
+          {
+            hunterId:
+              client.sessionId,
+            hunterName:
+              hunter.name,
+            x:
+              hunter.x,
+            y:
+              hunter.y,
+            poopUntil,
+            serverNow:
+              now,
+          },
+        );
+      }
+
+      this.sendFartState(
+        client,
+        now,
+      );
     },
 
     hunter_aim: (
@@ -2072,6 +2143,7 @@ export class MyRoom extends Room {
 
   /* V1010242_HUNTER_FART_SKILL */
   /* V1010247_FART_ULTIMATE_BALANCE */
+  /* V1010261_THIRD_FART_DETECT_FIRST */
   /* V1010254_RESET_FART_EACH_ROUND */
   private getUpdatedFartGauge(
     sessionId: string,
@@ -2124,95 +2196,72 @@ export class MyRoom extends Room {
     }
 
     const now = Date.now();
-    this.clients.forEach((client) => {
-      const hunter = this.state.players.get(client.sessionId);
-      if (!hunter || hunter.role !== 'hunter' || !hunter.alive) {
-        return;
-      }
 
-      this.getUpdatedFartGauge(client.sessionId, now);
-      const lastState =
-        this.lastFartStateSentAt.get(client.sessionId) ?? 0;
-      if (now - lastState >= 250) {
-        this.lastFartStateSentAt.set(client.sessionId, now);
-        this.sendFartState(client, now);
-      }
+    this.clients.forEach(
+      (client) => {
+        const hunter =
+          this.state.players.get(
+            client.sessionId,
+          );
 
-      const poopUntil =
-        this.poopUntilByHunter.get(client.sessionId) ?? 0;
-      if (poopUntil <= now) {
-        if (poopUntil > 0) {
-          this.poopUntilByHunter.delete(client.sessionId);
-          this.poopLaughTriggeredHunters.delete(client.sessionId);
-          this.sendFartState(client, now);
-        }
-        return;
-      }
-
-      /*
-       * One poop accident = one laugh total.
-       * The first living Hider entering the radius gets the laugh reaction;
-       * no repeated HAHAHA loop for the same accident.
-       */
-      if (
-        this.poopLaughTriggeredHunters.has(
-          client.sessionId,
-        )
-      ) {
-        return;
-      }
-
-      let laughingHider:
-        {
-          id: string;
-          x: number;
-          y: number;
-        } |
-        undefined;
-
-      this.state.players.forEach((hider, hiderId) => {
         if (
-          laughingHider ||
-          hider.role !== 'hider' ||
-          !hider.alive
+          !hunter ||
+          hunter.role !== 'hunter' ||
+          !hunter.alive
         ) {
           return;
         }
 
-        const distance = Math.hypot(
-          hunter.x - hider.x,
-          hunter.y - hider.y,
+        this.getUpdatedFartGauge(
+          client.sessionId,
+          now,
         );
 
-        if (distance <= this.fartRadius) {
-          laughingHider = {
-            id: hiderId,
-            x: hider.x,
-            y: hider.y,
-          };
+        const lastState =
+          this.lastFartStateSentAt.get(
+            client.sessionId,
+          ) ?? 0;
+
+        if (
+          now - lastState >= 250
+        ) {
+          this.lastFartStateSentAt.set(
+            client.sessionId,
+            now,
+          );
+
+          this.sendFartState(
+            client,
+            now,
+          );
         }
-      });
 
-      if (!laughingHider) {
-        return;
-      }
+        const poopUntil =
+          this.poopUntilByHunter.get(
+            client.sessionId,
+          ) ?? 0;
 
-      this.poopLaughTriggeredHunters.add(
-        client.sessionId,
-      );
+        if (
+          poopUntil > 0 &&
+          poopUntil <= now
+        ) {
+          this.poopUntilByHunter.delete(
+            client.sessionId,
+          );
 
-      this.broadcast('hider_laugh', {
-        hunterId: client.sessionId,
-        hiderId: laughingHider.id,
-        x: laughingHider.x,
-        y: laughingHider.y,
-      });
+          this.poopLaughTriggeredHunters.delete(
+            client.sessionId,
+          );
 
-      client.send('fart_detected', {
-        reaction: 'laugh',
-      });
-    });
+          this.sendFartState(
+            client,
+            now,
+          );
+        }
+      },
+    );
   }
+
 
   onCreate(
     options: JoinOptions,

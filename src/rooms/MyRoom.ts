@@ -3449,22 +3449,6 @@ export class MyRoom extends Room {
             client.sessionId,
         },
       );
-
-      /*
-       * V1010241_SINGLE_RECOVERY_OWNER
-       * A superseded transport must not stay alive. Otherwise a resumed mobile
-       * page can keep sending READY/phase-related actions through an identity
-       * that no longer owns PlayerState.
-       */
-      try {
-        client.leave(
-          4002,
-          "session_superseded",
-        );
-      } catch {
-        // The stale transport may already be closing.
-      }
-
       return;
     }
 

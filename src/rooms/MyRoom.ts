@@ -2072,6 +2072,7 @@ export class MyRoom extends Room {
 
   /* V1010242_HUNTER_FART_SKILL */
   /* V1010247_FART_ULTIMATE_BALANCE */
+  /* V1010254_RESET_FART_EACH_ROUND */
   private getUpdatedFartGauge(
     sessionId: string,
     now = Date.now(),
@@ -4318,6 +4319,66 @@ export class MyRoom extends Room {
   }
 
   private startCountdownPhase(): void {
+    /*
+     * V1010254_RESET_FART_EACH_ROUND:
+     * GAS/poop state is ROUND-SCOPED, never room-scoped.
+     * Without this reset, a Hunter ending the previous match at 72~100 GAS
+     * can inherit that pressure and instantly poop on the next round.
+     */
+    this.fartGaugeByHunter.clear();
+    this.fartGaugeUpdatedAt.clear();
+    this.poopUntilByHunter.clear();
+    this.poopLaughTriggeredHunters.clear();
+
+    const now =
+      Date.now();
+
+    /*
+     * Explicitly seed every current Hunter at GAS 0 and notify them
+     * immediately, so client HUD and authoritative state start in sync.
+     */
+    this.state.players.forEach(
+      (
+        player,
+        sessionId,
+      ) => {
+        if (
+          player.role !==
+          "hunter"
+        ) {
+          return;
+        }
+
+        this.fartGaugeByHunter.set(
+          sessionId,
+          0,
+        );
+
+        this.fartGaugeUpdatedAt.set(
+          sessionId,
+          now,
+        );
+
+        const hunterClient =
+          this.clients.find(
+            (
+              connectedClient,
+            ) =>
+              connectedClient.sessionId ===
+              sessionId,
+          );
+
+        if (
+          hunterClient
+        ) {
+          this.sendFartState(
+            hunterClient,
+            now,
+          );
+        }
+      },
+    );
+
     this.state.phase = "countdown";
 
 
@@ -4687,6 +4748,13 @@ export class MyRoom extends Room {
   }
 
   private resetToLobby(): void {
+    /*
+     * V1010254_RESET_FART_EACH_ROUND: defensive round-end cleanup.
+     */
+    this.fartGaugeByHunter.clear();
+    this.fartGaugeUpdatedAt.clear();
+    this.poopUntilByHunter.clear();
+    this.poopLaughTriggeredHunters.clear();
     this.state.phase = "lobby";
     this.state.phaseEndsAt = 0;
 

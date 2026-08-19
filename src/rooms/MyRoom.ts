@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010282_FART_RADIUS_110: authoritative 360-degree fart detection radius = 110. */
   maxClients = 10;
   state = new MyRoomState();
 
@@ -223,7 +224,7 @@ export class MyRoom extends Room {
   private readonly maxHunterReserve = 12;
 
   /* V1010242_HUNTER_FART_SKILL: server-authoritative comedy detector. */
-  private readonly fartRadius = 150;
+  private readonly fartRadius = 110;
   /* V1010247_FART_ULTIMATE_BALANCE: GAS is now danger/pressure, not remaining fuel. */
   private readonly fartCost = 36;
   /*

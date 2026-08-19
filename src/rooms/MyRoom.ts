@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010300_SERVER_EMPTY_ROOM_HARD_DISPOSE: zero-live-client public rooms are hidden immediately and disposed aggressively. */
   /* V1010297B_POST_ROUND_RECONNECT_RESTORE_RECOVER: recover a reserved player whose Schema actor was removed at round reset. */
   /* V1010285_AVATAR_PRESET_FULL_POINTS: keep complete lobby avatar paint when broadcasting to waiting room. */
   /* V1010282_FART_RADIUS_110: authoritative 360-degree fart detection radius = 110. */
@@ -4463,26 +4464,57 @@ const gauge =
       return;
     }
 
+    /*
+     * V1010300_SERVER_EMPTY_ROOM_HARD_DISPOSE: hide the room synchronously BEFORE waiting for Colyseus client
+     * collection / listing-cache convergence.
+     */
     this.syncRoomListingVisibility();
 
-    this.clock.setTimeout(
-      () => {
+    this.setPrivate(
+      true,
+    );
+
+    this.setMetadata({
+      ...(this.metadata ?? {}),
+      playerCount: 0,
+      clients: 0,
+    });
+
+    const disposeIfStillEmpty =
+      (): void => {
         if (
-          this.state.phase !== "lobby" ||
-          this.liveSessionIds.size > 0
+          this.state.phase !==
+            "lobby" ||
+          this.liveSessionIds.size >
+            0
         ) {
           return;
         }
 
+        this.syncRoomListingVisibility();
+
         console.log(
-          "[Color Hunt] disposing empty lobby",
+          "[Color Hunt] hard-disposing empty lobby",
           {
-            roomId: this.roomId,
+            roomId:
+              this.roomId,
           },
         );
 
         void this.disconnect();
-      },
+      };
+
+    /*
+     * First tick handles normal voluntary Lobby leave quickly.
+     * Second tick is a fallback for transport collection settling late.
+     */
+    this.clock.setTimeout(
+      disposeIfStillEmpty,
+      60,
+    );
+
+    this.clock.setTimeout(
+      disposeIfStillEmpty,
       300,
     );
   }

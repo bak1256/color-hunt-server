@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010370_LARGE_ROOM_TRANSPORT_BUDGET: common PC/mobile large-room patch fanout + narrow READY response; gameplay authority unchanged. */
   /* V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT: Paint->Hunt waits for a stable live roster and reconnect convergence. */
   /* V1010364S_P0_MULTIPLAYER_STABILITY: short lobby ghost grace, live-start authority, lower recovery chatter. */
   /* V1010345S_DISCONNECT_GRACE_HARDENING: tolerate transient transport loss before changing round outcome. */
@@ -2204,8 +2205,11 @@ if (
     request_paint_ready_state: (
       client: Client,
     ): void => {
-      /* V101072_READY_REQUEST_PHASE_RECOVERY */
-      this.sendLobbySnapshot(client);
+      /*
+       * V1010370_LARGE_ROOM_TRANSPORT_BUDGET / READY_NARROW_RESPONSE
+       * READY retries need only READY state. Reconnect/phase recovery asks for
+       * lobby_snapshot through its own explicit endpoint.
+       */
       this.sendPaintReadyState(client);
     },
 
@@ -2696,6 +2700,18 @@ if (
     options: JoinOptions,
   ): void {
     this.autoDispose = true;
+
+    /*
+     * V1010370_LARGE_ROOM_TRANSPORT_BUDGET / PATCH_RATE_15HZ
+     *
+     * Player x/y are client-predicted locally and interpolated remotely.
+     * In larger rooms, broadcasting Schema diffs at render-like cadence makes
+     * one mover fan out to every peer. ~15Hz keeps remote targets responsive
+     * while cutting common PC/mobile room-wide patch pressure.
+     */
+    this.setPatchRate(
+      66,
+    );
 
     /*
      * clock timeout이 어떤 이유로 지연되더라도 phaseEndsAt을 기준으로

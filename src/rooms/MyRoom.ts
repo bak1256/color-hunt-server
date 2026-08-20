@@ -284,7 +284,7 @@ export class MyRoom extends Room {
   private readonly lastFartUseAtByHunter =
     new Map<string, number>();
   private readonly fartRegenPerSecond = 0.75;
-  private readonly poopDurationMs = 8_000;
+  private readonly poopDurationMs = 5_000;
   private readonly fartGaugeByHunter = new Map<string, number>();
   private readonly fartGaugeUpdatedAt = new Map<string, number>();
   private readonly poopUntilByHunter = new Map<string, number>();
@@ -2303,6 +2303,7 @@ if (
   /* V1010281_FART_SERVER_COOLDOWN: authoritative 900ms fart cadence. */
   /* V1010277_GAS_10S_LINEAR_DRAIN: 10s accident + authoritative linear GAS drain. */
   /* V1010278_GAS_8S: authoritative accident duration = 8s. */
+  /* V1010362_POOP_DEBUFF_5S: authoritative poop movement debuff duration = 5s. */
   /* V1010261_THIRD_FART_DETECT_FIRST */
   /* V1010266_SERVER_POOP_DETECTED_FLAG */
   /* V1010254_RESET_FART_EACH_ROUND */

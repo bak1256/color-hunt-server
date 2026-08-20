@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010339S_FULL_PAINT_SERVER: authoritative full camouflage restore cap = 500 strokes. */
   /* V1010307_SERVER_AUTHORITATIVE_GAS_TARGET: fart_state/poop_burst carry authoritative 36/72/100 GAS destination. */
   /* V1010306_SERVER_GAS_THIRD_STAYS_MAX: 1st drains to36, 2nd drains to72, 3rd stays MAX and detector locks. */
   /* V1010304_SERVER_FINAL_GAS_DRAIN: no GAS zero-then-refill snap; poop drains directly to its escalation floor. */
@@ -590,7 +591,11 @@ export class MyRoom extends Room {
           payload?.strokes,
         )
           ? payload.strokes
-              .slice(0, 240)
+              /*
+               * V1010339S_FULL_PAINT_SERVER
+               * Dense complete-body camouflage can exceed 240 strokes.
+               */
+              .slice(0, 500)
           : [];
 
       if (raw.length < 1) {

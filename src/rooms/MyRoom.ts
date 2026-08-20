@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT: Paint->Hunt waits for a stable live roster and reconnect convergence. */
   /* V1010364S_P0_MULTIPLAYER_STABILITY: short lobby ghost grace, live-start authority, lower recovery chatter. */
   /* V1010345S_DISCONNECT_GRACE_HARDENING: tolerate transient transport loss before changing round outcome. */
   /* V1010341S_SERVER_PAINT_STABILITY_SAFE: authoritative full-paint restore retained through Hunt. */
@@ -112,6 +113,84 @@ export class MyRoom extends Room {
    */
   private readonly liveSessionIds =
     new Set<string>();
+
+  /*
+   * V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT
+   *
+   * The recorded failure showed server phase/timer continuing into Hunt while
+   * the live roster / paint transport was still converging after a disconnect.
+   * Treat transport membership changes as a short critical section.
+   */
+  private connectionTopologyChangedAt =
+    0;
+
+  private readonly paintHuntTopologySettleMs =
+    2_000;
+
+  private markConnectionTopologyChanged():
+    void {
+    this.connectionTopologyChangedAt =
+      Date.now();
+  }
+
+  private isPaintHuntTopologySettled(
+    now = Date.now(),
+  ): boolean {
+    return (
+      now -
+        this.connectionTopologyChangedAt >=
+      this.paintHuntTopologySettleMs
+    );
+  }
+
+  private getRoundAliveHiderIds():
+    string[] {
+    return [...this.state.players.entries()]
+      .filter(
+        ([, player]) =>
+          player.role === "hider" &&
+          player.alive,
+      )
+      .map(
+        ([sessionId]) =>
+          sessionId,
+      );
+  }
+
+  private canEnterHuntFromPaint(
+    now = Date.now(),
+  ): boolean {
+    if (
+      this.state.phase !== "paint" ||
+      !this.isPaintHuntTopologySettled(
+        now,
+      )
+    ) {
+      return false;
+    }
+
+    const roundHiderIds =
+      this.getRoundAliveHiderIds();
+
+    if (roundHiderIds.length < 1) {
+      return false;
+    }
+
+    /*
+     * A reconnect-reserved Hider remains in state.players, but MUST NOT allow
+     * Paint -> Hunt until its actual transport is live again (or existing
+     * disconnect-outcome logic resolves/removes it).
+     */
+    return roundHiderIds.every(
+      (sessionId) =>
+        this.liveSessionIds.has(
+          sessionId,
+        ) &&
+        !this.supersededSessionIds.has(
+          sessionId,
+        ),
+    );
+  }
 
   /*
    * v0.10.10.230 CONNECTION OWNERSHIP:
@@ -2110,7 +2189,8 @@ if (
         readyState.total < 1 ||
         readyState.ready !==
           readyState.total ||
-        !allRoundHidersLive
+        !allRoundHidersLive ||
+        !this.canEnterHuntFromPaint()
       ) {
         return;
       }
@@ -2710,6 +2790,7 @@ if (
     this.liveSessionIds.add(
       client.sessionId,
     );
+    this.markConnectionTopologyChanged();
 
     this.syncRoomListingVisibility();
 
@@ -2793,6 +2874,7 @@ if (
         this.liveSessionIds.delete(
           client.sessionId,
         );
+    this.markConnectionTopologyChanged();
 
         /*
          * v0.10.10.238.4 ZERO-PLAYER GHOST ROOM FIX
@@ -4040,6 +4122,7 @@ if (
     this.liveSessionIds.delete(
       client.sessionId,
     );
+    this.markConnectionTopologyChanged();
 
     this.updateRoomMetadata();
     this.syncRoomListingVisibility();
@@ -4164,6 +4247,7 @@ if (
       this.liveSessionIds.delete(
         client.sessionId,
       );
+    this.markConnectionTopologyChanged();
       this.updateRoomMetadata();
       this.syncRoomListingVisibility();
 
@@ -4196,6 +4280,7 @@ if (
         this.liveSessionIds.delete(
           client.sessionId,
         );
+    this.markConnectionTopologyChanged();
         this.updateRoomMetadata();
         this.syncRoomListingVisibility();
 
@@ -4293,6 +4378,7 @@ if (
     this.liveSessionIds.add(
       client.sessionId,
     );
+    this.markConnectionTopologyChanged();
 
     this.markRoleConnectionRestored(
       client.sessionId,
@@ -4466,6 +4552,7 @@ if (
     this.liveSessionIds.delete(
       client.sessionId,
     );
+    this.markConnectionTopologyChanged();
 
     /*
      * Hide/update before any round-specific early return.
@@ -4900,7 +4987,26 @@ if (
       this.state.phase ===
       "paint"
     ) {
-      this.startHuntPhase();
+      if (
+        this.canEnterHuntFromPaint()
+      ) {
+        this.startHuntPhase();
+      } else {
+        /*
+         * V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT / DEADLINE_HOLD
+         *
+         * Keep authoritative Paint alive in short slices. The UI may briefly
+         * show extra Paint time, but we never create the catastrophic state
+         * seen in the recording: Hunt timer alive while actors/paint are dead.
+         */
+        this.state.phaseEndsAt =
+          Date.now() +
+          1_000;
+
+        this.broadcastPhaseChanged();
+        this.broadcastPaintReadyState();
+      }
+
       return;
     }
 
@@ -5086,6 +5192,19 @@ if (
   }
 
   private startHuntPhase(): void {
+    /*
+     * V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT / FINAL_GATE
+     *
+     * Timers, READY and stale delayed callbacks all converge here.
+     * Never cross the Paint boundary with an unstable live roster.
+     */
+    if (
+      this.state.phase === "paint" &&
+      !this.canEnterHuntFromPaint()
+    ) {
+      return;
+    }
+
     /*
      * PHASE_DEADLINE_GUARD_PAINT
      *
@@ -5525,9 +5644,15 @@ if (
     const activeHiderIds =
       [...this.state.players.entries()]
         .filter(
-          ([, player]) =>
+          ([sessionId, player]) =>
             player.role === "hider" &&
-            player.alive,
+            player.alive &&
+            this.liveSessionIds.has(
+              sessionId,
+            ) &&
+            !this.supersededSessionIds.has(
+              sessionId,
+            ),
         )
         .map(
           ([sessionId]) =>

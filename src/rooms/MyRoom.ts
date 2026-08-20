@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010307_SERVER_AUTHORITATIVE_GAS_TARGET: fart_state/poop_burst carry authoritative 36/72/100 GAS destination. */
   /* V1010306_SERVER_GAS_THIRD_STAYS_MAX: 1st drains to36, 2nd drains to72, 3rd stays MAX and detector locks. */
   /* V1010304_SERVER_FINAL_GAS_DRAIN: no GAS zero-then-refill snap; poop drains directly to its escalation floor. */
   /* V1010302B_SERVER_FART_PROGRESSION_LOCK_RECOVER: 3 farts -> poop, then 2 -> poop, then 1 -> poop, then locked until next round. */
@@ -1513,6 +1514,18 @@ if (
             poopUntil,
             serverNow:
               now,
+            targetGauge:
+              this.getFartPostPoopFloor(
+                client.sessionId,
+              ),
+            accidentCount:
+              this.fartAccidentCountByHunter.get(
+                client.sessionId,
+              ) ?? 0,
+            locked:
+              this.fartLockedHunters.has(
+                client.sessionId,
+              ),
             /*
              * V1010266_SERVER_POOP_DETECTED_FLAG: client must not infer combo from message timing.
              */
@@ -2412,6 +2425,22 @@ if (
       poopUntil,
       serverNow: now,
       radius: this.fartRadius,
+
+      /*
+       * V1010307_SERVER_AUTHORITATIVE_GAS_TARGET: client must never guess the post-poop destination.
+       */
+      targetGauge:
+        this.getFartPostPoopFloor(
+          client.sessionId,
+        ),
+      accidentCount:
+        this.fartAccidentCountByHunter.get(
+          client.sessionId,
+        ) ?? 0,
+      locked:
+        this.fartLockedHunters.has(
+          client.sessionId,
+        ),
     });
   }
 

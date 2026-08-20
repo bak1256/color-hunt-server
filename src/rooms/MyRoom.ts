@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010302B_SERVER_FART_PROGRESSION_LOCK_RECOVER: 3 farts -> poop, then 2 -> poop, then 1 -> poop, then locked until next round. */
   /* V1010300_SERVER_EMPTY_ROOM_HARD_DISPOSE: zero-live-client public rooms are hidden immediately and disposed aggressively. */
   /* V1010297B_POST_ROUND_RECONNECT_RESTORE_RECOVER: recover a reserved player whose Schema actor was removed at round reset. */
   /* V1010285_AVATAR_PRESET_FULL_POINTS: keep complete lobby avatar paint when broadcasting to waiting room. */
@@ -246,6 +247,21 @@ export class MyRoom extends Room {
   private readonly fartRadius = 110;
   /* V1010247_FART_ULTIMATE_BALANCE: GAS is now danger/pressure, not remaining fuel. */
   private readonly fartCost = 36;
+  /*
+   * V1010302B_SERVER_FART_PROGRESSION_LOCK_RECOVER
+   *
+   * Round progression:
+   * accident 0 -> floor 0  : 3 farts
+   * accident 1 -> floor 36 : 2 farts
+   * accident 2 -> floor 72 : 1 fart
+   * accident 3 -> fart locked until next round
+   */
+  private readonly fartAccidentCountByHunter =
+    new Map<string, number>();
+
+  private readonly fartLockedHunters =
+    new Set<string>();
+
   /*
    * V1010281_FART_SERVER_COOLDOWN: authoritative anti-spam cadence.
    * Client also throttles for UX, but the server is the final guard.
@@ -1272,6 +1288,21 @@ export class MyRoom extends Room {
       ) {
         return;
       }
+      /*
+       * V1010302B_SERVER_FART_PROGRESSION_LOCK_RECOVER: third accident permanently disables detector this round.
+       */
+      if (
+        this.fartLockedHunters.has(
+          client.sessionId,
+        )
+      ) {
+        this.sendFartState(
+          client,
+          now,
+        );
+        return;
+      }
+
 
       
       const previousFartUseAt =
@@ -1414,6 +1445,29 @@ const gauge =
         const poopUntil =
           now +
           this.poopDurationMs;
+
+        const nextFartAccidentCount =
+          Math.min(
+            3,
+            (
+              this.fartAccidentCountByHunter.get(
+                client.sessionId,
+              ) ?? 0
+            ) + 1,
+          );
+
+        this.fartAccidentCountByHunter.set(
+          client.sessionId,
+          nextFartAccidentCount,
+        );
+
+        if (
+          nextFartAccidentCount >= 3
+        ) {
+          this.fartLockedHunters.add(
+            client.sessionId,
+          );
+        }
 
         this.poopUntilByHunter.set(
           client.sessionId,
@@ -2203,48 +2257,89 @@ const gauge =
   /* V1010261_THIRD_FART_DETECT_FIRST */
   /* V1010266_SERVER_POOP_DETECTED_FLAG */
   /* V1010254_RESET_FART_EACH_ROUND */
+  private getFartPostPoopFloor(
+    sessionId: string,
+  ): number {
+    if (
+      this.fartLockedHunters.has(
+        sessionId,
+      )
+    ) {
+      return 0;
+    }
+
+    const accidents =
+      this.fartAccidentCountByHunter.get(
+        sessionId,
+      ) ?? 0;
+
+    if (accidents >= 2) {
+      return 72;
+    }
+
+    if (accidents === 1) {
+      return 36;
+    }
+
+    return 0;
+  }
+
   private getUpdatedFartGauge(
     sessionId: string,
     now = Date.now(),
   ): number {
     const previous =
-      this.fartGaugeByHunter.get(sessionId) ?? 0;
+      this.fartGaugeByHunter.get(
+        sessionId,
+      ) ?? 0;
 
     const updatedAt =
-      this.fartGaugeUpdatedAt.get(sessionId) ?? now;
+      this.fartGaugeUpdatedAt.get(
+        sessionId,
+      ) ?? now;
 
     const poopUntil =
-      this.poopUntilByHunter.get(sessionId) ?? 0;
+      this.poopUntilByHunter.get(
+        sessionId,
+      ) ?? 0;
+
+    const floor =
+      this.getFartPostPoopFloor(
+        sessionId,
+      );
 
     let next: number;
 
-    if (poopUntil > 0) {
-      /*
-       * V1010277_GAS_10S_LINEAR_DRAIN: while the accident exists, GAS is the debuff countdown itself.
-       * This exactly mirrors Practice:
-       * 10.0s remaining = 100%, 5.0s = 50%, 0s = 0%.
-       *
-       * updateFartSkillSystem() calls this BEFORE deleting an expired
-       * poopUntil, so the final authoritative state is guaranteed to hit 0.
-       */
+    if (poopUntil > now) {
       const remainingMs =
         Math.max(
           0,
           poopUntil - now,
         );
 
-      next =
+      const progress =
         Math.max(
           0,
           Math.min(
-            100,
-            (
-              remainingMs /
-              this.poopDurationMs
-            ) *
-              100,
+            1,
+            remainingMs /
+              this.poopDurationMs,
           ),
         );
+
+      /*
+       * Accident animation:
+       * first  : 100 -> 36
+       * second : 100 -> 72
+       * third  : 100 -> 0 (locked)
+       */
+      next =
+        floor +
+        (
+          100 -
+          floor
+        ) *
+          progress;
     } else {
       const elapsedSeconds =
         Math.max(
@@ -2255,7 +2350,7 @@ const gauge =
 
       next =
         Math.max(
-          0,
+          floor,
           Math.min(
             100,
             previous -
@@ -4670,6 +4765,8 @@ const gauge =
     this.fartGaugeByHunter.clear();
     this.fartGaugeUpdatedAt.clear();
     this.lastFartUseAtByHunter.clear();
+    this.fartAccidentCountByHunter.clear();
+    this.fartLockedHunters.clear();
     this.poopUntilByHunter.clear();
     this.poopLaughTriggeredHunters.clear();
 

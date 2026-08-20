@@ -88,7 +88,6 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
-  /* V1010378B_HUNT_RETRY_RECOVER: Paint->Hunt reconnect barrier retries every 250ms instead of stalling indefinitely. */
   /* V1010377B_FINAL_CAMOUFLAGE_SNAPSHOT_RECOVER: format-tolerant immutable final camouflage snapshot transport. */
   /* V1010375B_HUNT_SETTLING_RECOVER: format-tolerant 1.7s Paint->Hunt quiet window with READY -> GO client event. */
   /* V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT: Paint->Hunt waits for a stable live roster and reconnect convergence. */
@@ -5360,25 +5359,6 @@ if (
       this.state.phase === "paint" &&
       !this.canEnterHuntFromPaint()
     ) {
-      /*
-       * V1010378B_HUNT_RETRY_RECOVER
-       *
-       * READY->GO may reach this authoritative gate while the reconnect/live
-       * roster is still settling. Re-arm until convergence instead of waiting
-       * forever for an unrelated callback.
-       */
-      this.clock.setTimeout(
-        () => {
-          if (
-            this.state.phase ===
-            "paint"
-          ) {
-            this.startHuntPhase();
-          }
-        },
-        250,
-      );
-
       return;
     }
 

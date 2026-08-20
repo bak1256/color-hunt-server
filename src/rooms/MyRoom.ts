@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010345S_DISCONNECT_GRACE_HARDENING: tolerate transient transport loss before changing round outcome. */
   /* V1010341S_SERVER_PAINT_STABILITY_SAFE: authoritative full-paint restore retained through Hunt. */
   /* V1010339S_FULL_PAINT_SERVER: authoritative full camouflage restore cap = 500 strokes. */
   /* V1010307_SERVER_AUTHORITATIVE_GAS_TARGET: fart_state/poop_burst carry authoritative 36/72/100 GAS destination. */
@@ -199,8 +200,16 @@ export class MyRoom extends Room {
   private readonly hiderDisconnectGenerationBySessionId =
     new Map<string, number>();
 
+  /*
+   * V1010345S_DISCONNECT_GRACE_HARDENING
+   *
+   * Mobile/Wi-Fi/browser transport stalls of 10-15s are unfortunately common
+   * enough that they must not decide a live round. Give the SAME player/session
+   * 25s of silent recovery, then retain the existing 5s visible countdown.
+   * Total gameplay outcome grace = 30s.
+   */
   private readonly disconnectSilentGraceMs =
-    10_000;
+    25_000;
   private readonly disconnectVisibleCountdownSeconds =
     5;
 

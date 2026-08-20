@@ -88,7 +88,6 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
-  /* V1010375B_HUNT_SETTLING_RECOVER: format-tolerant 1.7s Paint->Hunt quiet window with READY -> GO client event. */
   /* V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT: Paint->Hunt waits for a stable live roster and reconnect convergence. */
   /* V1010364S_P0_MULTIPLAYER_STABILITY: short lobby ghost grace, live-start authority, lower recovery chatter. */
   /* V1010345S_DISCONNECT_GRACE_HARDENING: tolerate transient transport loss before changing round outcome. */
@@ -124,66 +123,6 @@ export class MyRoom extends Room {
    */
   private connectionTopologyChangedAt =
     0;
-
-  /*
-   * V1010375B_HUNT_SETTLING_RECOVER
-   * Paint stops first, then Hunt starts after a short server-authoritative
-   * quiet window. Dense final paint/network work can settle before the Hunt
-   * clock and movement/fire traffic begin.
-   */
-  private huntSettlingReady =
-    false;
-
-  private huntSettlingUntil =
-    0;
-
-  private beginHuntSettling(): void {
-    if (
-      this.state.phase !== "paint" ||
-      this.huntSettlingUntil > 0
-    ) {
-      return;
-    }
-
-    const now =
-      Date.now();
-
-    this.huntSettlingUntil =
-      now + 1700;
-
-    this.broadcast(
-      "hunt_settling",
-      {
-        endsAt:
-          this.huntSettlingUntil,
-        serverNow:
-          now,
-      },
-    );
-
-    this.clock.setTimeout(
-      () => {
-        if (
-          this.state.phase !== "paint"
-        ) {
-          this.huntSettlingUntil =
-            0;
-          return;
-        }
-
-        this.huntSettlingUntil =
-          0;
-        this.huntSettlingReady =
-          true;
-
-        /*
-         * Re-enter the same authoritative v366b Hunt gate.
-         */
-        this.startHuntPhase();
-      },
-      1700,
-    );
-  }
 
   private readonly paintHuntTopologySettleMs =
     2_000;
@@ -5342,20 +5281,6 @@ if (
           this.state.phaseEndsAt,
       },
     );
-    /*
-     * V1010375B_HUNT_SETTLING_RECOVER / QUIET_WINDOW
-     *
-     * The first valid Paint completion freezes new Paint traffic and starts
-     * the visible READY -> GO window. The second pass after 1.7s crosses into
-     * Hunt, so the Hunt timer loses zero seconds.
-     */
-    if (!this.huntSettlingReady) {
-      this.beginHuntSettling();
-      return;
-    }
-
-    this.huntSettlingReady =
-      false;
 
     this.state.phase = "hunt";
 
@@ -5549,10 +5474,6 @@ if (
   }
 
   private resetToLobby(): void {
-    this.huntSettlingReady =
-      false;
-    this.huntSettlingUntil =
-      0;
     /*
      * V1010254_RESET_FART_EACH_ROUND: defensive round-end cleanup.
      */

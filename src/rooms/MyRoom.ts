@@ -88,7 +88,6 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
-  /* V1010377B_FINAL_CAMOUFLAGE_SNAPSHOT_RECOVER: format-tolerant immutable final camouflage snapshot transport. */
   /* V1010375B_HUNT_SETTLING_RECOVER: format-tolerant 1.7s Paint->Hunt quiet window with READY -> GO client event. */
   /* V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT: Paint->Hunt waits for a stable live roster and reconnect convergence. */
   /* V1010364S_P0_MULTIPLAYER_STABILITY: short lobby ghost grace, live-start authority, lower recovery chatter. */
@@ -508,14 +507,6 @@ export class MyRoom extends Room {
 
   private readonly lobbyAvatarPresets =
     new Map<string, any[]>();
-
-  /*
-   * V1010377B_FINAL_CAMOUFLAGE_SNAPSHOT_RECOVER
-   * Hunt needs one immutable final camouflage image per player, not historical
-   * brush playback. 80x120 PNG payloads are tiny and replaced atomically.
-   */
-  private readonly finalCamouflageSnapshots =
-    new Map<string, string>();
 
   private readonly roundPaintStrokes =
     new Map<string, any[]>();
@@ -966,88 +957,6 @@ export class MyRoom extends Room {
           );
         },
         2200,
-      );
-    },
-
-    /*
-     * V1010377B_FINAL_CAMOUFLAGE_SNAPSHOT_RECOVER / FINAL_UPLOAD
-     */
-    final_camouflage_snapshot: (
-      client: Client,
-      payload: {
-        dataUrl?: unknown;
-      },
-    ): void => {
-      if (
-        this.state.phase !== "paint" &&
-        this.state.phase !== "hunt"
-      ) {
-        return;
-      }
-
-      if (
-        !this.state.players.has(
-          client.sessionId,
-        )
-      ) {
-        return;
-      }
-
-      const dataUrl =
-        typeof payload?.dataUrl ===
-          "string"
-          ? payload.dataUrl
-          : "";
-
-      /*
-       * Strict PNG + bounded payload. A real 80x120 snapshot is normally much
-       * smaller; this is a defensive memory ceiling.
-       */
-      if (
-        !dataUrl.startsWith(
-          "data:image/png;base64,",
-        ) ||
-        dataUrl.length >
-          90_000
-      ) {
-        return;
-      }
-
-      this.finalCamouflageSnapshots.set(
-        client.sessionId,
-        dataUrl,
-      );
-
-      this.broadcast(
-        "final_camouflage_snapshot",
-        {
-          sessionId:
-            client.sessionId,
-          dataUrl,
-        },
-      );
-    },
-
-    request_final_camouflage_snapshots: (
-      client: Client,
-    ): void => {
-      client.send(
-        "final_camouflage_snapshots",
-        {
-          snapshots:
-            [...this.finalCamouflageSnapshots.entries()]
-              .filter(
-                ([sessionId]) =>
-                  this.state.players.has(
-                    sessionId,
-                  ),
-              )
-              .map(
-                ([sessionId, dataUrl]) => ({
-                  sessionId,
-                  dataUrl,
-                })),
-        },
       );
     },
 
@@ -5303,11 +5212,6 @@ if (
 
     this.state.phase = "paint";
 
-    /*
-     * V1010377B_FINAL_CAMOUFLAGE_SNAPSHOT_RECOVER: each round owns a brand-new immutable Hunt snapshot set.
-     */
-    this.finalCamouflageSnapshots.clear();
-
 
     this.state.phaseEndsAt =
       Date.now() +
@@ -5645,11 +5549,6 @@ if (
   }
 
   private resetToLobby(): void {
-    /*
-     * V1010377B_FINAL_CAMOUFLAGE_SNAPSHOT_RECOVER: round camouflage never crosses into lobby avatars.
-     */
-    this.finalCamouflageSnapshots.clear();
-
     this.huntSettlingReady =
       false;
     this.huntSettlingUntil =

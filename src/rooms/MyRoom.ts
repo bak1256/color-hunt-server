@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010306_SERVER_GAS_THIRD_STAYS_MAX: 1st drains to36, 2nd drains to72, 3rd stays MAX and detector locks. */
   /* V1010304_SERVER_FINAL_GAS_DRAIN: no GAS zero-then-refill snap; poop drains directly to its escalation floor. */
   /* V1010302B_SERVER_FART_PROGRESSION_LOCK_RECOVER: 3 farts -> poop, then 2 -> poop, then 1 -> poop, then locked until next round. */
   /* V1010300_SERVER_EMPTY_ROOM_HARD_DISPOSE: zero-live-client public rooms are hidden immediately and disposed aggressively. */
@@ -1468,13 +1469,24 @@ const gauge =
           ? 36
           : nextFartAccidentCount === 2
             ? 72
-            : 0;
+            : 100;
 
 if (
           nextFartAccidentCount >= 3
         ) {
           this.fartLockedHunters.add(
             client.sessionId,
+          );
+
+          /* V1010306_THIRD_ACCIDENT_MAX_COMMIT */
+          this.fartGaugeByHunter.set(
+            client.sessionId,
+            100,
+          );
+
+          this.fartGaugeUpdatedAt.set(
+            client.sessionId,
+            now,
           );
         }
 
@@ -2274,7 +2286,10 @@ if (
         sessionId,
       )
     ) {
-      return 0;
+      /*
+       * V1010306_SERVER_GAS_THIRD_STAYS_MAX: third accident is MAX forever for this round.
+       */
+      return 100;
     }
 
     const accidents =

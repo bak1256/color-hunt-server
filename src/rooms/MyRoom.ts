@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010341S_SERVER_PAINT_STABILITY_SAFE: authoritative full-paint restore retained through Hunt. */
   /* V1010339S_FULL_PAINT_SERVER: authoritative full camouflage restore cap = 500 strokes. */
   /* V1010307_SERVER_AUTHORITATIVE_GAS_TARGET: fart_state/poop_burst carry authoritative 36/72/100 GAS destination. */
   /* V1010306_SERVER_GAS_THIRD_STAYS_MAX: 1st drains to36, 2nd drains to72, 3rd stays MAX and detector locks. */

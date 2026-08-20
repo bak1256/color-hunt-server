@@ -88,7 +88,6 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
-  /* V1010379B_SERVER_CORE_RECOVERY: core recovery - no live paint fan-out and no unbounded READY->GO stall. */
   /* V1010378B_HUNT_RETRY_RECOVER: Paint->Hunt reconnect barrier retries every 250ms instead of stalling indefinitely. */
   /* V1010377B_FINAL_CAMOUFLAGE_SNAPSHOT_RECOVER: format-tolerant immutable final camouflage snapshot transport. */
   /* V1010375B_HUNT_SETTLING_RECOVER: format-tolerant 1.7s Paint->Hunt quiet window with READY -> GO client event. */
@@ -140,13 +139,6 @@ export class MyRoom extends Room {
   private huntSettlingUntil =
     0;
 
-  /*
-   * V1010379B_SERVER_CORE_RECOVERY: READY->GO may wait briefly for reconnect convergence,
-   * but never strand the whole room for minutes.
-   */
-  private huntTransitionForceAt =
-    0;
-
   private beginHuntSettling(): void {
     if (
       this.state.phase !== "paint" ||
@@ -160,12 +152,6 @@ export class MyRoom extends Room {
 
     this.huntSettlingUntil =
       now + 1700;
-
-    /*
-     * V1010379B_SERVER_CORE_RECOVERY / FORCE_DEADLINE_SET
-     */
-    this.huntTransitionForceAt =
-      now + 5_000;
 
     this.broadcast(
       "hunt_settling",
@@ -2489,7 +2475,21 @@ if (
         targetHistory,
       );
 
-      /* V1010379B_SERVER_CORE_RECOVERY: room-wide paint_stroke fan-out removed; final PNG owns Hunt appearance. */
+      this.broadcast(
+        "paint_stroke",
+        {
+          senderId:
+            client.sessionId,
+          targetSessionId,
+          color,
+          size,
+          shape,
+          points,
+        },
+        {
+          except: client,
+        },
+      );
     },
   };
 
@@ -3413,7 +3413,23 @@ if (
                       const stroke =
                         reconnectSelfPaint[cursor];
 
-                      /* V1010379B_SERVER_CORE_RECOVERY: room-wide paint_stroke fan-out removed; final PNG owns Hunt appearance. */
+                      this.broadcast(
+                        "paint_stroke",
+                        {
+                          senderId:
+                            stroke.senderId,
+                          targetSessionId:
+                            client.sessionId,
+                          color:
+                            stroke.color,
+                          size:
+                            stroke.size,
+                          shape:
+                            stroke.shape,
+                          points:
+                            stroke.points,
+                        },
+                      );
                     }
 
                     if (
@@ -3449,7 +3465,23 @@ if (
 
                 reconnectSelfPaint.forEach(
                   (stroke: any) => {
-                    /* V1010379B_SERVER_CORE_RECOVERY: room-wide paint_stroke fan-out removed; final PNG owns Hunt appearance. */
+                    this.broadcast(
+                      "paint_stroke",
+                      {
+                        senderId:
+                          stroke.senderId,
+                        targetSessionId:
+                          client.sessionId,
+                        color:
+                          stroke.color,
+                        size:
+                          stroke.size,
+                        shape:
+                          stroke.shape,
+                        points:
+                          stroke.points,
+                      },
+                    );
                   },
                 );
               },
@@ -3618,7 +3650,23 @@ if (
                 const stroke =
                   reconnectPaint[cursor];
 
-                /* V1010379B_SERVER_CORE_RECOVERY: room-wide paint_stroke fan-out removed; final PNG owns Hunt appearance. */
+                this.broadcast(
+                  "paint_stroke",
+                  {
+                    senderId:
+                      stroke.senderId,
+                    targetSessionId:
+                      client.sessionId,
+                    color:
+                      stroke.color,
+                    size:
+                      stroke.size,
+                    shape:
+                      stroke.shape,
+                    points:
+                      stroke.points,
+                  },
+                );
               }
 
               if (
@@ -5313,55 +5361,25 @@ if (
       !this.canEnterHuntFromPaint()
     ) {
       /*
-       * V1010379B_SERVER_CORE_RECOVERY / BOUNDED_FINAL_GATE
+       * V1010378B_HUNT_RETRY_RECOVER
        *
-       * Give reconnect/topology convergence a short grace period. If one live
-       * Hider still exists after the deadline, do not trap every connected
-       * client on READY/GO indefinitely.
+       * READY->GO may reach this authoritative gate while the reconnect/live
+       * roster is still settling. Re-arm until convergence instead of waiting
+       * forever for an unrelated callback.
        */
-      const now =
-        Date.now();
+      this.clock.setTimeout(
+        () => {
+          if (
+            this.state.phase ===
+            "paint"
+          ) {
+            this.startHuntPhase();
+          }
+        },
+        250,
+      );
 
-      const liveHiderExists =
-        this.getRoundAliveHiderIds()
-          .some(
-            (sessionId) =>
-              this.liveSessionIds.has(
-                sessionId,
-              ) &&
-              !this.supersededSessionIds.has(
-                sessionId,
-              ),
-          );
-
-      if (
-        this.huntTransitionForceAt > 0 &&
-        now >=
-          this.huntTransitionForceAt &&
-        liveHiderExists
-      ) {
-        console.warn(
-          "[Color Hunt] forcing Hunt after bounded READY/GO grace",
-          {
-            liveClients:
-              this.liveSessionIds.size,
-          },
-        );
-      } else {
-        this.clock.setTimeout(
-          () => {
-            if (
-              this.state.phase ===
-              "paint"
-            ) {
-              this.startHuntPhase();
-            }
-          },
-          250,
-        );
-
-        return;
-      }
+      return;
     }
 
     /*
@@ -5647,12 +5665,6 @@ if (
   }
 
   private resetToLobby(): void {
-    /*
-     * V1010379B_SERVER_CORE_RECOVERY / LOBBY_RESET
-     */
-    this.huntTransitionForceAt =
-      0;
-
     /*
      * V1010377B_FINAL_CAMOUFLAGE_SNAPSHOT_RECOVER: round camouflage never crosses into lobby avatars.
      */

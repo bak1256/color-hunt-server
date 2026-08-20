@@ -10,6 +10,7 @@ import {
 
 import { MyRoom } from "./rooms/MyRoom.js";
 
+/* V1010371_CORS_MATCHMAKING_RECOVERY: Vercel <-> Render CORS/OPTIONS restored for API + Colyseus matchmaking. */
 const server = defineServer({
     rooms: {
         chameleon_hunt: defineRoom(MyRoom),
@@ -80,6 +81,81 @@ const server = defineServer({
     }),
 
     express: (app) => {
+        /*
+         * V1010371_CORS_MATCHMAKING_RECOVERY
+         *
+         * Browser client lives on Vercel while Colyseus is self-hosted on
+         * Render. CORS must therefore be present BEFORE matchmaking and custom
+         * routes. A missing header makes a valid server response look like
+         * "Failed to fetch" in the browser.
+         */
+        app.use(
+            (req, res, next) => {
+                const origin =
+                    String(
+                        req.headers.origin ??
+                        "",
+                    );
+
+                const allowedOrigins =
+                    new Set([
+                        "https://color-hunt-mu.vercel.app",
+                        "http://localhost:5173",
+                        "http://127.0.0.1:5173",
+                    ]);
+
+                /*
+                 * Also permit Vercel preview deployments belonging to this app.
+                 */
+                const isAllowedVercelPreview =
+                    /^https:\/\/color-hunt(?:-[a-z0-9-]+)?\.vercel\.app$/i
+                        .test(
+                            origin,
+                        );
+
+                if (
+                    allowedOrigins.has(
+                        origin,
+                    ) ||
+                    isAllowedVercelPreview
+                ) {
+                    res.setHeader(
+                        "Access-Control-Allow-Origin",
+                        origin,
+                    );
+                    res.setHeader(
+                        "Vary",
+                        "Origin",
+                    );
+                }
+
+                res.setHeader(
+                    "Access-Control-Allow-Methods",
+                    "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+                );
+                res.setHeader(
+                    "Access-Control-Allow-Headers",
+                    "Content-Type, Authorization",
+                );
+                res.setHeader(
+                    "Access-Control-Max-Age",
+                    "86400",
+                );
+
+                if (
+                    req.method ===
+                    "OPTIONS"
+                ) {
+                    res.sendStatus(
+                        204,
+                    );
+                    return;
+                }
+
+                next();
+            },
+        );
+
         /*
          * v0.10.10.238.5 INVITE PREFLIGHT
          *

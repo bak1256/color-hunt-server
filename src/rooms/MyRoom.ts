@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010364S_P0_MULTIPLAYER_STABILITY: short lobby ghost grace, live-start authority, lower recovery chatter. */
   /* V1010345S_DISCONNECT_GRACE_HARDENING: tolerate transient transport loss before changing round outcome. */
   /* V1010341S_SERVER_PAINT_STABILITY_SAFE: authoritative full-paint restore retained through Hunt. */
   /* V1010339S_FULL_PAINT_SERVER: authoritative full camouflage restore cap = 500 strokes. */
@@ -1190,17 +1191,71 @@ export class MyRoom extends Room {
         return;
       }
 
-      if (this.state.players.size < 2) {
+      /*
+       * V1010364S_P0_MULTIPLAYER_STABILITY
+       * state.players can intentionally contain reconnect-reserved actors.
+       * A browser that was simply closed must never count toward a new round.
+       */
+      const liveLobbyPlayerIds =
+        [...this.liveSessionIds]
+          .filter(
+            (sessionId) =>
+              this.state.players.has(
+                sessionId,
+              ) &&
+              !this.supersededSessionIds.has(
+                sessionId,
+              ),
+          );
+
+      if (liveLobbyPlayerIds.length < 2) {
         client.send(
           "start_game_error",
           {
             message:
-              "게임 시작에는 최소 2명이 필요합니다.",
+              "게임 시작에는 현재 접속 중인 플레이어가 최소 2명 필요합니다.",
           },
         );
 
         return;
       }
+
+      /*
+       * Defensive cleanup before role assignment. Normally lobby onDrop removes
+       * these after the short grace below, but START must be authoritative even
+       * if the user presses it during that grace window.
+       */
+      for (
+        const sessionId of
+        [...this.state.players.keys()]
+      ) {
+        if (
+          liveLobbyPlayerIds.includes(
+            sessionId,
+          )
+        ) {
+          continue;
+        }
+
+        this.state.players.delete(
+          sessionId,
+        );
+        this.clientKeyBySessionId.delete(
+          sessionId,
+        );
+        this.paintReadySessionIds.delete(
+          sessionId,
+        );
+        this.lobbyAvatarPresets.delete(
+          sessionId,
+        );
+        this.roundPaintStrokes.delete(
+          sessionId,
+        );
+      }
+
+      this.ensureValidHost();
+      this.updateRoomMetadata();
 
       /*
        * 모든 클라이언트가 반드시 동일한 맵을 사용하도록
@@ -1955,7 +2010,13 @@ if (
       if (
         !player ||
         player.role !== "hider" ||
-        !player.alive
+        !player.alive ||
+        !this.liveSessionIds.has(
+          client.sessionId,
+        ) ||
+        this.supersededSessionIds.has(
+          client.sessionId,
+        )
       ) {
         return;
       }
@@ -2028,10 +2089,28 @@ if (
       const readyState =
         this.getPaintReadyState();
 
+      const allRoundHidersLive =
+        [...this.state.players.entries()]
+          .filter(
+            ([, player]) =>
+              player.role === "hider" &&
+              player.alive,
+          )
+          .every(
+            ([sessionId]) =>
+              this.liveSessionIds.has(
+                sessionId,
+              ) &&
+              !this.supersededSessionIds.has(
+                sessionId,
+              ),
+          );
+
       if (
         readyState.total < 1 ||
         readyState.ready !==
-          readyState.total
+          readyState.total ||
+        !allRoundHidersLive
       ) {
         return;
       }
@@ -2547,19 +2626,23 @@ if (
         this.checkPhaseDeadline();
         this.updateFartSkillSystem();
 
-        /* V101072_READY_PERIODIC_PULSE */
+        /*
+         * V1010364S_P0_MULTIPLAYER_STABILITY
+         * READY changes are already broadcast immediately. Keep only a slow
+         * recovery pulse instead of broadcasting room-wide twice per second.
+         */
         if (
           this.state.phase === "paint" &&
           Date.now() -
             this.lastPaintReadyPulseAt >=
-            500
+            2_000
         ) {
           this.lastPaintReadyPulseAt =
             Date.now();
           this.broadcastPaintReadyState();
         }
       },
-      50,
+      100,
     );
 
     this.state.phase = "lobby";
@@ -4038,9 +4121,24 @@ if (
        * - paint identity is not remapped
        * - other players are not churned by this temporary absence
        */
+      /*
+       * V1010364S_P0_MULTIPLAYER_STABILITY
+       *
+       * Lobby actors are disposable: a closed mobile browser should disappear
+       * quickly instead of remaining as a five-minute ghost and being assigned
+       * a role in the next round.
+       *
+       * Active rounds keep the long reservation because mobile OS suspension
+       * is common and the existing round-outcome grace already handles absence.
+       */
+      const reconnectSeconds =
+        this.state.phase === "lobby"
+          ? 8
+          : 300;
+
       await this.allowReconnection(
         client,
-        300,
+        reconnectSeconds,
       );
     } catch {
       /*

@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010371_LOBBY_READY_BARRIER: non-host lobby READY + live-player start validation. */
   /* V1010285_AVATAR_PRESET_FULL_POINTS: keep complete lobby avatar paint when broadcasting to waiting room. */
   /* V1010282_FART_RADIUS_110: authoritative 360-degree fart detection radius = 110. */
   maxClients = 10;
@@ -217,6 +218,14 @@ export class MyRoom extends Room {
   private readonly hunterRoundStats =
     new Map<string, HunterRoundStats>();
 
+  /*
+   * V1010371_LOBBY_READY_BARRIER:
+   * Lobby READY is separate from Paint READY.
+   * Only non-host, currently-live players count toward the start barrier.
+   */
+  private readonly lobbyReadySessionIds =
+    new Set<string>();
+
   private readonly paintReadySessionIds =
     new Set<string>();
 
@@ -284,6 +293,8 @@ export class MyRoom extends Room {
           this.state.phaseEndsAt,
         serverNow:
           Date.now(),
+        lobbyReadyState:
+          this.getLobbyReadyState(),
         paintReadyState:
           this.getPaintReadyState(),
         players:
@@ -1211,6 +1222,60 @@ export class MyRoom extends Room {
       );
     },
 
+    /*
+     * V1010371_LOBBY_READY_BARRIER:
+     * Every live non-host player explicitly confirms readiness.
+     */
+    lobby_ready: (
+      client: Client,
+      message: {
+        ready?: boolean;
+      },
+    ): void => {
+      if (this.state.phase !== "lobby") {
+        return;
+      }
+
+      this.ensureValidHost();
+
+      if (
+        !this.state.players.has(
+          client.sessionId,
+        ) ||
+        !this.liveSessionIds.has(
+          client.sessionId,
+        ) ||
+        client.sessionId ===
+          this.state.hostId
+      ) {
+        this.lobbyReadySessionIds.delete(
+          client.sessionId,
+        );
+        this.broadcastLobbyReadyState();
+        return;
+      }
+
+      if (message?.ready === false) {
+        this.lobbyReadySessionIds.delete(
+          client.sessionId,
+        );
+      } else {
+        this.lobbyReadySessionIds.add(
+          client.sessionId,
+        );
+      }
+
+      this.broadcastLobbyReadyState();
+    },
+
+    request_lobby_ready_state: (
+      client: Client,
+    ): void => {
+      this.sendLobbyReadyState(
+        client,
+      );
+    },
+
     start_game: (
       client: Client,
     ): void => {
@@ -1241,12 +1306,50 @@ export class MyRoom extends Room {
         return;
       }
 
-      if (this.state.players.size < 2) {
+      const lobbyReadyState =
+        this.getLobbyReadyState();
+
+      if (
+        lobbyReadyState.livePlayerCount <
+        2
+      ) {
         client.send(
           "start_game_error",
           {
             message:
               "게임 시작에는 최소 2명이 필요합니다.",
+          },
+        );
+
+        return;
+      }
+
+      /*
+       * Never start while a reconnect-preserved/stale Lobby player still exists.
+       * This prevents a host from unknowingly starting with a ghost participant.
+       */
+      if (
+        lobbyReadyState.hasDisconnectedPlayers
+      ) {
+        client.send(
+          "start_game_error",
+          {
+            message:
+              "연결이 끊긴 참가자를 정리 중입니다. 잠시 후 다시 시작해주세요.",
+          },
+        );
+
+        return;
+      }
+
+      if (
+        !lobbyReadyState.allReady
+      ) {
+        client.send(
+          "start_game_error",
+          {
+            message:
+              `아직 준비하지 않은 참가자가 있습니다. (${lobbyReadyState.readyCount}/${lobbyReadyState.totalCount})`,
           },
         );
 
@@ -4332,6 +4435,11 @@ const gauge =
       client.sessionId,
     );
 
+    /* V1010371_LOBBY_READY_BARRIER / LEAVE_CLEANUP */
+    this.lobbyReadySessionIds.delete(
+      client.sessionId,
+    );
+
     /* V101069_READY_LEAVE_CLEANUP */
     this.paintReadySessionIds.delete(client.sessionId);
     if (this.state.phase === "paint") {
@@ -4367,6 +4475,12 @@ const gauge =
           );
         },
       );
+    }
+
+    if (
+      this.state.phase === "lobby"
+    ) {
+      this.broadcastLobbyReadyState();
     }
 
     this.broadcast(
@@ -4809,6 +4923,7 @@ const gauge =
     /* V101082B_CLEAR_ROUND_PAINT */
     this.roundPaintStrokes.clear();
 
+    this.lobbyReadySessionIds.clear();
     this.paintReadySessionIds.clear();
 
     this.updateRoomMetadata();
@@ -5185,6 +5300,9 @@ const gauge =
     this.state.winner = "";
     /* V101071_LOBBY_SETTLE_RESET */
     this.lobbyStartAllowedAt = Date.now() + 1_000;
+    /* V1010371_LOBBY_READY_BARRIER / ROUND_RESET */
+    this.lobbyReadySessionIds.clear();
+
     /* V101069_READY_RESET */
     this.paintReadySessionIds.clear();
 
@@ -5241,6 +5359,126 @@ const gauge =
      * now dispose the resulting empty lobby as well.
      */
     this.disposeEmptyLobbySoon();
+  }
+
+  private getLobbyReadyState(): {
+    readyCount: number;
+    totalCount: number;
+    allReady: boolean;
+    canStart: boolean;
+    readySessionIds: string[];
+    livePlayerCount: number;
+    hasDisconnectedPlayers: boolean;
+  } {
+    this.ensureValidHost();
+
+    const stateSessionIds =
+      [...this.state.players.keys()];
+
+    const livePlayerIds =
+      stateSessionIds.filter(
+        (sessionId) =>
+          this.liveSessionIds.has(
+            sessionId,
+          ),
+      );
+
+    const eligibleIds =
+      livePlayerIds.filter(
+        (sessionId) =>
+          sessionId !==
+          this.state.hostId,
+      );
+
+    const eligibleSet =
+      new Set(eligibleIds);
+
+    for (
+      const sessionId of
+      [...this.lobbyReadySessionIds]
+    ) {
+      if (!eligibleSet.has(sessionId)) {
+        this.lobbyReadySessionIds.delete(
+          sessionId,
+        );
+      }
+    }
+
+    const readySessionIds =
+      eligibleIds.filter(
+        (sessionId) =>
+          this.lobbyReadySessionIds.has(
+            sessionId,
+          ),
+      );
+
+    const readyCount =
+      readySessionIds.length;
+    const totalCount =
+      eligibleIds.length;
+
+    const hasDisconnectedPlayers =
+      stateSessionIds.some(
+        (sessionId) =>
+          !this.liveSessionIds.has(
+            sessionId,
+          ),
+      );
+
+    const allReady =
+      totalCount > 0 &&
+      readyCount === totalCount;
+
+    return {
+      readyCount,
+      totalCount,
+      allReady,
+      canStart:
+        livePlayerIds.length >= 2 &&
+        !hasDisconnectedPlayers &&
+        allReady,
+      readySessionIds,
+      livePlayerCount:
+        livePlayerIds.length,
+      hasDisconnectedPlayers,
+    };
+  }
+
+  private sendLobbyReadyState(
+    client: Client,
+  ): void {
+    client.send(
+      "lobby_ready_state",
+      this.getLobbyReadyState(),
+    );
+  }
+
+  private broadcastLobbyReadyState(): void {
+    if (
+      this.state.phase !== "lobby"
+    ) {
+      return;
+    }
+
+    const state =
+      this.getLobbyReadyState();
+
+    this.broadcast(
+      "lobby_ready_state",
+      state,
+    );
+
+    /*
+     * Also refresh Lobby snapshots so host handoff + ready counter converge
+     * together on clients that missed one plain message.
+     */
+    this.clients.forEach(
+      (connectedClient) => {
+        this.sendLobbySnapshot(
+          connectedClient,
+        );
+      },
+    );
   }
 
   private getPaintReadyState(): {

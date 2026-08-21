@@ -4064,18 +4064,14 @@ const gauge =
       },
     );
 
-    /* V101082B_RECONNECT_PAINT_REPLAY */
-    client.send(
-      "round_paint_state",
-      {
-        strokes:
-          this.state.phase === "paint" ||
-          this.state.phase === "hunt" ||
-          this.state.phase === "countdown"
-            ? [...this.roundPaintStrokes.values()]
-                .flat()
-            : [],
-      },
+    /*
+     * V1010366_RECONNECT_PAINT_CHUNK_FIX:
+     * Reconnect must use the same bounded/chunked recovery path as an explicit
+     * request. The old code flattened the ENTIRE round history into one frame,
+     * which can immediately drop the freshly reconnected socket with code 1006.
+     */
+    this.sendRoundPaintStateChunked(
+      client,
     );
 
     client.send(

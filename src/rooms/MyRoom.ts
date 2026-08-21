@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010372_POOP_5S_RESTORE: authoritative Hunter poop slowdown = 5 seconds. */
   /* V1010371_LOBBY_READY_BARRIER: non-host lobby READY + live-player start validation. */
   /* V1010285_AVATAR_PRESET_FULL_POINTS: keep complete lobby avatar paint when broadcasting to waiting room. */
   /* V1010282_FART_RADIUS_110: authoritative 360-degree fart detection radius = 110. */
@@ -245,7 +246,11 @@ export class MyRoom extends Room {
   private readonly lastFartUseAtByHunter =
     new Map<string, number>();
   private readonly fartRegenPerSecond = 0.75;
-  private readonly poopDurationMs = 8_000;
+  /*
+   * V1010372_POOP_5S_RESTORE:
+   * Keep authoritative slowdown duration aligned with the client HUD/copy.
+   */
+  private readonly poopDurationMs = 5_000;
   private readonly fartGaugeByHunter = new Map<string, number>();
   private readonly fartGaugeUpdatedAt = new Map<string, number>();
   private readonly poopUntilByHunter = new Map<string, number>();

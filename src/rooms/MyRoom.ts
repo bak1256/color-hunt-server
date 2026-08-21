@@ -88,6 +88,8 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010372_POOP_5S_RESTORE: authoritative Hunter poop slowdown = 5 seconds. */
+  /* V1010371_LOBBY_READY_BARRIER: non-host lobby READY + live-player start validation. */
   /* V1010285_AVATAR_PRESET_FULL_POINTS: keep complete lobby avatar paint when broadcasting to waiting room. */
   /* V1010282_FART_RADIUS_110: authoritative 360-degree fart detection radius = 110. */
   maxClients = 10;
@@ -217,6 +219,14 @@ export class MyRoom extends Room {
   private readonly hunterRoundStats =
     new Map<string, HunterRoundStats>();
 
+  /*
+   * V1010371_LOBBY_READY_BARRIER:
+   * Lobby READY is separate from Paint READY.
+   * Only non-host, currently-live players count toward the start barrier.
+   */
+  private readonly lobbyReadySessionIds =
+    new Set<string>();
+
   private readonly paintReadySessionIds =
     new Set<string>();
 
@@ -236,7 +246,11 @@ export class MyRoom extends Room {
   private readonly lastFartUseAtByHunter =
     new Map<string, number>();
   private readonly fartRegenPerSecond = 0.75;
-  private readonly poopDurationMs = 8_000;
+  /*
+   * V1010372_POOP_5S_RESTORE:
+   * Keep authoritative slowdown duration aligned with the client HUD/copy.
+   */
+  private readonly poopDurationMs = 5_000;
   private readonly fartGaugeByHunter = new Map<string, number>();
   private readonly fartGaugeUpdatedAt = new Map<string, number>();
   private readonly poopUntilByHunter = new Map<string, number>();
@@ -284,6 +298,8 @@ export class MyRoom extends Room {
           this.state.phaseEndsAt,
         serverNow:
           Date.now(),
+        lobbyReadyState:
+          this.getLobbyReadyState(),
         paintReadyState:
           this.getPaintReadyState(),
         players:
@@ -321,6 +337,85 @@ export class MyRoom extends Room {
 
   private readonly roundPaintStrokes =
     new Map<string, any[]>();
+
+  /*
+   * V1010365_MAX_PAYLOAD_SERVER_FIX:
+   * A full round paint history can be too large for one WebSocket frame.
+   * Send authoritative paint recovery in bounded chunks instead.
+   */
+  private sendRoundPaintStateChunked(
+    client: Client,
+  ): void {
+    const active =
+      this.state.phase === "paint" ||
+      this.state.phase === "hunt" ||
+      this.state.phase === "countdown";
+
+    if (!active) {
+      client.send("round_paint_state", {
+        strokes: [],
+        reset: true,
+        complete: true,
+      });
+      return;
+    }
+
+    const allStrokes =
+      [...this.roundPaintStrokes.values()]
+        .flat();
+
+    const chunkSize = 24;
+
+    if (allStrokes.length === 0) {
+      client.send("round_paint_state", {
+        strokes: [],
+        reset: true,
+        complete: true,
+      });
+      return;
+    }
+
+    for (
+      let offset = 0;
+      offset < allStrokes.length;
+      offset += chunkSize
+    ) {
+      const strokes =
+        allStrokes.slice(
+          offset,
+          offset + chunkSize,
+        );
+
+      const delay =
+        Math.floor(offset / chunkSize) * 35;
+
+      this.clock.setTimeout(
+        () => {
+          if (
+            !this.clients.some(
+              (connectedClient) =>
+                connectedClient.sessionId ===
+                client.sessionId,
+            )
+          ) {
+            return;
+          }
+
+          client.send(
+            "round_paint_state",
+            {
+              strokes,
+              reset: offset === 0,
+              complete:
+                offset + chunkSize >=
+                allStrokes.length,
+            },
+          );
+        },
+        delay,
+      );
+    }
+  }
 
   messages = {
     select_hunt_duration: (
@@ -553,7 +648,7 @@ export class MyRoom extends Room {
           payload?.strokes,
         )
           ? payload.strokes
-              .slice(0, 240)
+              .slice(0, 120)
           : [];
 
       if (raw.length < 1) {
@@ -595,7 +690,7 @@ export class MyRoom extends Room {
                   ? stroke.points
                       .slice(
                         0,
-                        1000,
+                        96,
                       )
                       .map(
                         (point: any) => ({
@@ -743,25 +838,61 @@ export class MyRoom extends Room {
             return;
           }
 
-          normalized.forEach(
-            (stroke: any) => {
-              this.clients.forEach(
-                (otherClient) => {
-                  if (
-                    otherClient.sessionId ===
-                      client.sessionId
-                  ) {
-                    return;
-                  }
+          let replayCursor = 0;
 
-                  otherClient.send(
-                    "paint_stroke",
-                    stroke,
-                  );
-                },
-              );
-            },
-          );
+          const replayBatch =
+            (): void => {
+              if (
+                !this.state.players.has(
+                  client.sessionId,
+                )
+              ) {
+                return;
+              }
+
+              const replayEnd =
+                Math.min(
+                  normalized.length,
+                  replayCursor + 5,
+                );
+
+              for (
+                ;
+                replayCursor < replayEnd;
+                replayCursor += 1
+              ) {
+                const stroke =
+                  normalized[replayCursor];
+
+                this.clients.forEach(
+                  (otherClient) => {
+                    if (
+                      otherClient.sessionId ===
+                        client.sessionId
+                    ) {
+                      return;
+                    }
+
+                    otherClient.send(
+                      "paint_stroke",
+                      stroke,
+                    );
+                  },
+                );
+              }
+
+              if (
+                replayCursor <
+                normalized.length
+              ) {
+                this.clock.setTimeout(
+                  replayBatch,
+                  70,
+                );
+              }
+            };
+
+          replayBatch();
         },
         2200,
       );
@@ -770,20 +901,8 @@ export class MyRoom extends Room {
     request_round_paint_state: (
       client: Client,
     ): void => {
-      const active =
-        this.state.phase === "paint" ||
-        this.state.phase === "hunt" ||
-        this.state.phase === "countdown";
-
-      client.send(
-        "round_paint_state",
-        {
-          strokes:
-            active
-              ? [...this.roundPaintStrokes.values()]
-                  .flat()
-              : [],
-        },
+      this.sendRoundPaintStateChunked(
+        client,
       );
     },
 
@@ -1108,6 +1227,60 @@ export class MyRoom extends Room {
       );
     },
 
+    /*
+     * V1010371_LOBBY_READY_BARRIER:
+     * Every live non-host player explicitly confirms readiness.
+     */
+    lobby_ready: (
+      client: Client,
+      message: {
+        ready?: boolean;
+      },
+    ): void => {
+      if (this.state.phase !== "lobby") {
+        return;
+      }
+
+      this.ensureValidHost();
+
+      if (
+        !this.state.players.has(
+          client.sessionId,
+        ) ||
+        !this.liveSessionIds.has(
+          client.sessionId,
+        ) ||
+        client.sessionId ===
+          this.state.hostId
+      ) {
+        this.lobbyReadySessionIds.delete(
+          client.sessionId,
+        );
+        this.broadcastLobbyReadyState();
+        return;
+      }
+
+      if (message?.ready === false) {
+        this.lobbyReadySessionIds.delete(
+          client.sessionId,
+        );
+      } else {
+        this.lobbyReadySessionIds.add(
+          client.sessionId,
+        );
+      }
+
+      this.broadcastLobbyReadyState();
+    },
+
+    request_lobby_ready_state: (
+      client: Client,
+    ): void => {
+      this.sendLobbyReadyState(
+        client,
+      );
+    },
+
     start_game: (
       client: Client,
     ): void => {
@@ -1138,12 +1311,50 @@ export class MyRoom extends Room {
         return;
       }
 
-      if (this.state.players.size < 2) {
+      const lobbyReadyState =
+        this.getLobbyReadyState();
+
+      if (
+        lobbyReadyState.livePlayerCount <
+        2
+      ) {
         client.send(
           "start_game_error",
           {
             message:
               "게임 시작에는 최소 2명이 필요합니다.",
+          },
+        );
+
+        return;
+      }
+
+      /*
+       * Never start while a reconnect-preserved/stale Lobby player still exists.
+       * This prevents a host from unknowingly starting with a ghost participant.
+       */
+      if (
+        lobbyReadyState.hasDisconnectedPlayers
+      ) {
+        client.send(
+          "start_game_error",
+          {
+            message:
+              "연결이 끊긴 참가자를 정리 중입니다. 잠시 후 다시 시작해주세요.",
+          },
+        );
+
+        return;
+      }
+
+      if (
+        !lobbyReadyState.allReady
+      ) {
+        client.send(
+          "start_game_error",
+          {
+            message:
+              `아직 준비하지 않은 참가자가 있습니다. (${lobbyReadyState.readyCount}/${lobbyReadyState.totalCount})`,
           },
         );
 
@@ -2454,8 +2665,24 @@ const gauge =
         roomId: this.roomId,
         sessionId:
           client.sessionId,
+        phase:
+          this.state.phase,
+        reconnectFallback:
+          options.reconnectFallback === true,
+        clientKeyPresent:
+          String(
+            options.clientKey ?? "",
+          ).trim().length > 0,
         existingPlayers:
           this.state.players.size,
+        liveClients:
+          this.liveSessionIds.size,
+        roomClients:
+          this.clients.length,
+        hostId:
+          this.state.hostId,
+        serverNow:
+          Date.now(),
       },
     );
 
@@ -3789,12 +4016,41 @@ const gauge =
      * Give the same session 10 seconds to reconnect. While this is pending,
      * DO NOT delete the player and DO NOT abort the round.
      */
+    const droppedSnapshot =
+      this.state.players.get(
+        client.sessionId,
+      );
+
     console.log(
       "[Chameleon Hunt] temporary drop",
       {
+        roomId:
+          this.roomId,
         sessionId:
           client.sessionId,
+        phase:
+          this.state.phase,
+        role:
+          droppedSnapshot?.role ?? "unknown",
+        alive:
+          droppedSnapshot?.alive ?? false,
+        x:
+          droppedSnapshot?.x ?? null,
+        y:
+          droppedSnapshot?.y ?? null,
         code,
+        liveClients:
+          this.liveSessionIds.size,
+        roomClients:
+          this.clients.length,
+        statePlayers:
+          this.state.players.size,
+        hostId:
+          this.state.hostId,
+        phaseEndsAt:
+          this.state.phaseEndsAt,
+        serverNow:
+          Date.now(),
       },
     );
 
@@ -3896,8 +4152,30 @@ const gauge =
       console.warn(
         "[Chameleon Hunt] ignored stale reconnect",
         {
+          roomId:
+            this.roomId,
           sessionId:
             client.sessionId,
+          phase:
+            this.state.phase,
+          superseded:
+            this.supersededSessionIds.has(
+              client.sessionId,
+            ),
+          playerExists:
+            this.state.players.has(
+              client.sessionId,
+            ),
+          liveClients:
+            this.liveSessionIds.size,
+          roomClients:
+            this.clients.length,
+          statePlayers:
+            this.state.players.size,
+          hostId:
+            this.state.hostId,
+          serverNow:
+            Date.now(),
         },
       );
       return;
@@ -3917,13 +4195,40 @@ const gauge =
     /* V101078_CANCEL_NO_HUNTER_ON_RECONNECT */
     this.noHunterGraceGeneration += 1;
 
+    const reconnectSnapshot =
+      this.state.players.get(
+        client.sessionId,
+      );
+
     console.log(
       "[Chameleon Hunt] reconnected",
       {
+        roomId:
+          this.roomId,
         sessionId:
           client.sessionId,
         phase:
           this.state.phase,
+        role:
+          reconnectSnapshot?.role ?? "unknown",
+        alive:
+          reconnectSnapshot?.alive ?? false,
+        x:
+          reconnectSnapshot?.x ?? null,
+        y:
+          reconnectSnapshot?.y ?? null,
+        liveClients:
+          this.liveSessionIds.size,
+        roomClients:
+          this.clients.length,
+        statePlayers:
+          this.state.players.size,
+        hostId:
+          this.state.hostId,
+        phaseEndsAt:
+          this.state.phaseEndsAt,
+        serverNow:
+          Date.now(),
       },
     );
 
@@ -3961,18 +4266,14 @@ const gauge =
       },
     );
 
-    /* V101082B_RECONNECT_PAINT_REPLAY */
-    client.send(
-      "round_paint_state",
-      {
-        strokes:
-          this.state.phase === "paint" ||
-          this.state.phase === "hunt" ||
-          this.state.phase === "countdown"
-            ? [...this.roundPaintStrokes.values()]
-                .flat()
-            : [],
-      },
+    /*
+     * V1010366_RECONNECT_PAINT_CHUNK_FIX:
+     * Reconnect must use the same bounded/chunked recovery path as an explicit
+     * request. The old code flattened the ENTIRE round history into one frame,
+     * which can immediately drop the freshly reconnected socket with code 1006.
+     */
+    this.sendRoundPaintStateChunked(
+      client,
     );
 
     client.send(
@@ -4029,6 +4330,37 @@ const gauge =
   ): void {
     this.liveSessionIds.delete(
       client.sessionId,
+    );
+
+    const leavingSnapshotForLog =
+      this.state.players.get(
+        client.sessionId,
+      );
+
+    console.log(
+      "[Chameleon Hunt] permanent leave",
+      {
+        roomId:
+          this.roomId,
+        sessionId:
+          client.sessionId,
+        phase:
+          this.state.phase,
+        role:
+          leavingSnapshotForLog?.role ?? "unknown",
+        alive:
+          leavingSnapshotForLog?.alive ?? false,
+        liveClients:
+          this.liveSessionIds.size,
+        roomClients:
+          this.clients.length,
+        statePlayers:
+          this.state.players.size,
+        hostId:
+          this.state.hostId,
+        serverNow:
+          Date.now(),
+      },
     );
 
     /*
@@ -4108,6 +4440,11 @@ const gauge =
       client.sessionId,
     );
 
+    /* V1010371_LOBBY_READY_BARRIER / LEAVE_CLEANUP */
+    this.lobbyReadySessionIds.delete(
+      client.sessionId,
+    );
+
     /* V101069_READY_LEAVE_CLEANUP */
     this.paintReadySessionIds.delete(client.sessionId);
     if (this.state.phase === "paint") {
@@ -4143,6 +4480,12 @@ const gauge =
           );
         },
       );
+    }
+
+    if (
+      this.state.phase === "lobby"
+    ) {
+      this.broadcastLobbyReadyState();
     }
 
     this.broadcast(
@@ -4585,6 +4928,7 @@ const gauge =
     /* V101082B_CLEAR_ROUND_PAINT */
     this.roundPaintStrokes.clear();
 
+    this.lobbyReadySessionIds.clear();
     this.paintReadySessionIds.clear();
 
     this.updateRoomMetadata();
@@ -4961,6 +5305,9 @@ const gauge =
     this.state.winner = "";
     /* V101071_LOBBY_SETTLE_RESET */
     this.lobbyStartAllowedAt = Date.now() + 1_000;
+    /* V1010371_LOBBY_READY_BARRIER / ROUND_RESET */
+    this.lobbyReadySessionIds.clear();
+
     /* V101069_READY_RESET */
     this.paintReadySessionIds.clear();
 
@@ -5017,6 +5364,126 @@ const gauge =
      * now dispose the resulting empty lobby as well.
      */
     this.disposeEmptyLobbySoon();
+  }
+
+  private getLobbyReadyState(): {
+    readyCount: number;
+    totalCount: number;
+    allReady: boolean;
+    canStart: boolean;
+    readySessionIds: string[];
+    livePlayerCount: number;
+    hasDisconnectedPlayers: boolean;
+  } {
+    this.ensureValidHost();
+
+    const stateSessionIds =
+      [...this.state.players.keys()];
+
+    const livePlayerIds =
+      stateSessionIds.filter(
+        (sessionId) =>
+          this.liveSessionIds.has(
+            sessionId,
+          ),
+      );
+
+    const eligibleIds =
+      livePlayerIds.filter(
+        (sessionId) =>
+          sessionId !==
+          this.state.hostId,
+      );
+
+    const eligibleSet =
+      new Set(eligibleIds);
+
+    for (
+      const sessionId of
+      [...this.lobbyReadySessionIds]
+    ) {
+      if (!eligibleSet.has(sessionId)) {
+        this.lobbyReadySessionIds.delete(
+          sessionId,
+        );
+      }
+    }
+
+    const readySessionIds =
+      eligibleIds.filter(
+        (sessionId) =>
+          this.lobbyReadySessionIds.has(
+            sessionId,
+          ),
+      );
+
+    const readyCount =
+      readySessionIds.length;
+    const totalCount =
+      eligibleIds.length;
+
+    const hasDisconnectedPlayers =
+      stateSessionIds.some(
+        (sessionId) =>
+          !this.liveSessionIds.has(
+            sessionId,
+          ),
+      );
+
+    const allReady =
+      totalCount > 0 &&
+      readyCount === totalCount;
+
+    return {
+      readyCount,
+      totalCount,
+      allReady,
+      canStart:
+        livePlayerIds.length >= 2 &&
+        !hasDisconnectedPlayers &&
+        allReady,
+      readySessionIds,
+      livePlayerCount:
+        livePlayerIds.length,
+      hasDisconnectedPlayers,
+    };
+  }
+
+  private sendLobbyReadyState(
+    client: Client,
+  ): void {
+    client.send(
+      "lobby_ready_state",
+      this.getLobbyReadyState(),
+    );
+  }
+
+  private broadcastLobbyReadyState(): void {
+    if (
+      this.state.phase !== "lobby"
+    ) {
+      return;
+    }
+
+    const state =
+      this.getLobbyReadyState();
+
+    this.broadcast(
+      "lobby_ready_state",
+      state,
+    );
+
+    /*
+     * Also refresh Lobby snapshots so host handoff + ready counter converge
+     * together on clients that missed one plain message.
+     */
+    this.clients.forEach(
+      (connectedClient) => {
+        this.sendLobbySnapshot(
+          connectedClient,
+        );
+      },
+    );
   }
 
   private getPaintReadyState(): {

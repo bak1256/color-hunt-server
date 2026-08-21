@@ -322,6 +322,85 @@ export class MyRoom extends Room {
   private readonly roundPaintStrokes =
     new Map<string, any[]>();
 
+  /*
+   * V1010365_MAX_PAYLOAD_SERVER_FIX:
+   * A full round paint history can be too large for one WebSocket frame.
+   * Send authoritative paint recovery in bounded chunks instead.
+   */
+  private sendRoundPaintStateChunked(
+    client: Client,
+  ): void {
+    const active =
+      this.state.phase === "paint" ||
+      this.state.phase === "hunt" ||
+      this.state.phase === "countdown";
+
+    if (!active) {
+      client.send("round_paint_state", {
+        strokes: [],
+        reset: true,
+        complete: true,
+      });
+      return;
+    }
+
+    const allStrokes =
+      [...this.roundPaintStrokes.values()]
+        .flat();
+
+    const chunkSize = 24;
+
+    if (allStrokes.length === 0) {
+      client.send("round_paint_state", {
+        strokes: [],
+        reset: true,
+        complete: true,
+      });
+      return;
+    }
+
+    for (
+      let offset = 0;
+      offset < allStrokes.length;
+      offset += chunkSize
+    ) {
+      const strokes =
+        allStrokes.slice(
+          offset,
+          offset + chunkSize,
+        );
+
+      const delay =
+        Math.floor(offset / chunkSize) * 35;
+
+      this.clock.setTimeout(
+        () => {
+          if (
+            !this.clients.some(
+              (connectedClient) =>
+                connectedClient.sessionId ===
+                client.sessionId,
+            )
+          ) {
+            return;
+          }
+
+          client.send(
+            "round_paint_state",
+            {
+              strokes,
+              reset: offset === 0,
+              complete:
+                offset + chunkSize >=
+                allStrokes.length,
+            },
+          );
+        },
+        delay,
+      );
+    }
+  }
+
   messages = {
     select_hunt_duration: (
       client: Client,
@@ -553,7 +632,7 @@ export class MyRoom extends Room {
           payload?.strokes,
         )
           ? payload.strokes
-              .slice(0, 240)
+              .slice(0, 120)
           : [];
 
       if (raw.length < 1) {
@@ -595,7 +674,7 @@ export class MyRoom extends Room {
                   ? stroke.points
                       .slice(
                         0,
-                        1000,
+                        96,
                       )
                       .map(
                         (point: any) => ({
@@ -743,25 +822,61 @@ export class MyRoom extends Room {
             return;
           }
 
-          normalized.forEach(
-            (stroke: any) => {
-              this.clients.forEach(
-                (otherClient) => {
-                  if (
-                    otherClient.sessionId ===
-                      client.sessionId
-                  ) {
-                    return;
-                  }
+          let replayCursor = 0;
 
-                  otherClient.send(
-                    "paint_stroke",
-                    stroke,
-                  );
-                },
-              );
-            },
-          );
+          const replayBatch =
+            (): void => {
+              if (
+                !this.state.players.has(
+                  client.sessionId,
+                )
+              ) {
+                return;
+              }
+
+              const replayEnd =
+                Math.min(
+                  normalized.length,
+                  replayCursor + 5,
+                );
+
+              for (
+                ;
+                replayCursor < replayEnd;
+                replayCursor += 1
+              ) {
+                const stroke =
+                  normalized[replayCursor];
+
+                this.clients.forEach(
+                  (otherClient) => {
+                    if (
+                      otherClient.sessionId ===
+                        client.sessionId
+                    ) {
+                      return;
+                    }
+
+                    otherClient.send(
+                      "paint_stroke",
+                      stroke,
+                    );
+                  },
+                );
+              }
+
+              if (
+                replayCursor <
+                normalized.length
+              ) {
+                this.clock.setTimeout(
+                  replayBatch,
+                  70,
+                );
+              }
+            };
+
+          replayBatch();
         },
         2200,
       );
@@ -770,20 +885,8 @@ export class MyRoom extends Room {
     request_round_paint_state: (
       client: Client,
     ): void => {
-      const active =
-        this.state.phase === "paint" ||
-        this.state.phase === "hunt" ||
-        this.state.phase === "countdown";
-
-      client.send(
-        "round_paint_state",
-        {
-          strokes:
-            active
-              ? [...this.roundPaintStrokes.values()]
-                  .flat()
-              : [],
-        },
+      this.sendRoundPaintStateChunked(
+        client,
       );
     },
 

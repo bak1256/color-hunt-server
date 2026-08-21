@@ -2557,8 +2557,24 @@ const gauge =
         roomId: this.roomId,
         sessionId:
           client.sessionId,
+        phase:
+          this.state.phase,
+        reconnectFallback:
+          options.reconnectFallback === true,
+        clientKeyPresent:
+          String(
+            options.clientKey ?? "",
+          ).trim().length > 0,
         existingPlayers:
           this.state.players.size,
+        liveClients:
+          this.liveSessionIds.size,
+        roomClients:
+          this.clients.length,
+        hostId:
+          this.state.hostId,
+        serverNow:
+          Date.now(),
       },
     );
 
@@ -3892,12 +3908,41 @@ const gauge =
      * Give the same session 10 seconds to reconnect. While this is pending,
      * DO NOT delete the player and DO NOT abort the round.
      */
+    const droppedSnapshot =
+      this.state.players.get(
+        client.sessionId,
+      );
+
     console.log(
       "[Chameleon Hunt] temporary drop",
       {
+        roomId:
+          this.roomId,
         sessionId:
           client.sessionId,
+        phase:
+          this.state.phase,
+        role:
+          droppedSnapshot?.role ?? "unknown",
+        alive:
+          droppedSnapshot?.alive ?? false,
+        x:
+          droppedSnapshot?.x ?? null,
+        y:
+          droppedSnapshot?.y ?? null,
         code,
+        liveClients:
+          this.liveSessionIds.size,
+        roomClients:
+          this.clients.length,
+        statePlayers:
+          this.state.players.size,
+        hostId:
+          this.state.hostId,
+        phaseEndsAt:
+          this.state.phaseEndsAt,
+        serverNow:
+          Date.now(),
       },
     );
 
@@ -3999,8 +4044,30 @@ const gauge =
       console.warn(
         "[Chameleon Hunt] ignored stale reconnect",
         {
+          roomId:
+            this.roomId,
           sessionId:
             client.sessionId,
+          phase:
+            this.state.phase,
+          superseded:
+            this.supersededSessionIds.has(
+              client.sessionId,
+            ),
+          playerExists:
+            this.state.players.has(
+              client.sessionId,
+            ),
+          liveClients:
+            this.liveSessionIds.size,
+          roomClients:
+            this.clients.length,
+          statePlayers:
+            this.state.players.size,
+          hostId:
+            this.state.hostId,
+          serverNow:
+            Date.now(),
         },
       );
       return;
@@ -4020,13 +4087,40 @@ const gauge =
     /* V101078_CANCEL_NO_HUNTER_ON_RECONNECT */
     this.noHunterGraceGeneration += 1;
 
+    const reconnectSnapshot =
+      this.state.players.get(
+        client.sessionId,
+      );
+
     console.log(
       "[Chameleon Hunt] reconnected",
       {
+        roomId:
+          this.roomId,
         sessionId:
           client.sessionId,
         phase:
           this.state.phase,
+        role:
+          reconnectSnapshot?.role ?? "unknown",
+        alive:
+          reconnectSnapshot?.alive ?? false,
+        x:
+          reconnectSnapshot?.x ?? null,
+        y:
+          reconnectSnapshot?.y ?? null,
+        liveClients:
+          this.liveSessionIds.size,
+        roomClients:
+          this.clients.length,
+        statePlayers:
+          this.state.players.size,
+        hostId:
+          this.state.hostId,
+        phaseEndsAt:
+          this.state.phaseEndsAt,
+        serverNow:
+          Date.now(),
       },
     );
 
@@ -4128,6 +4222,37 @@ const gauge =
   ): void {
     this.liveSessionIds.delete(
       client.sessionId,
+    );
+
+    const leavingSnapshotForLog =
+      this.state.players.get(
+        client.sessionId,
+      );
+
+    console.log(
+      "[Chameleon Hunt] permanent leave",
+      {
+        roomId:
+          this.roomId,
+        sessionId:
+          client.sessionId,
+        phase:
+          this.state.phase,
+        role:
+          leavingSnapshotForLog?.role ?? "unknown",
+        alive:
+          leavingSnapshotForLog?.alive ?? false,
+        liveClients:
+          this.liveSessionIds.size,
+        roomClients:
+          this.clients.length,
+        statePlayers:
+          this.state.players.size,
+        hostId:
+          this.state.hostId,
+        serverNow:
+          Date.now(),
+      },
     );
 
     /*

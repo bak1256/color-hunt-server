@@ -88,6 +88,86 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /*
+   * V1010439_PERSONALIZED_ROUND_RESULT
+   *
+   * round_result used to be identical for every Hunter and the browser then
+   * attempted to match foundByHunterSessionId/clientKey locally. That is fragile
+   * across reconnect/session replacement and produced 0 FOUND.
+   *
+   * Send the SAME authoritative team result to every client, but append a
+   * recipient-specific personalFoundHiders array on the server.
+   */
+  private sendRoundResultPersonalized(
+    payload: any,
+  ): void {
+    const teamFound =
+      Array.isArray(
+        payload?.victoryShowcase
+          ?.foundHiders,
+      )
+        ? payload.victoryShowcase
+            .foundHiders
+        : [];
+
+    for (const resultClient of this.clients) {
+      const recipientSessionId =
+        resultClient.sessionId;
+
+      const recipientClientKey =
+        this.clientKeyBySessionId.get(
+          recipientSessionId,
+        ) ?? "";
+
+      const personalFoundHiders =
+        teamFound.filter(
+          (entry: any) => {
+            const finderClientKey =
+              String(
+                entry
+                  ?.foundByHunterClientKey ??
+                  "",
+              );
+
+            if (
+              recipientClientKey &&
+              finderClientKey
+            ) {
+              return (
+                finderClientKey ===
+                recipientClientKey
+              );
+            }
+
+            return (
+              String(
+                entry
+                  ?.foundByHunterSessionId ??
+                  "",
+              ) ===
+              recipientSessionId
+            );
+          },
+        );
+
+      resultClient.send(
+        "round_result",
+        {
+          ...payload,
+          victoryShowcase: {
+            ...(
+              payload
+                ?.victoryShowcase ??
+              {}
+            ),
+            personalFoundHiders,
+          },
+        },
+      );
+    }
+  }
+
+
   /* V1010438_STABLE_HUNTER_VICTORY_IDENTITY: victory ownership follows stable clientKey, not transport session. */
   /* V1010436B_VICTORY_FOUND_PAINT_AUTHORITATIVE: authoritative FOUND metadata and paint in every victory path. */
   /* V1010434_HUNTER_PERSONAL_FOUND_ATTRIBUTION: victory card knows which Hunter personally found each Hider. */
@@ -5609,8 +5689,7 @@ this.sendPaintReadyState(client);
           }>,
       };
 
-      this.broadcast(
-        "round_result",
+      this.sendRoundResultPersonalized(
         {
           winner:
             "hunters",
@@ -5622,7 +5701,7 @@ this.sendPaintReadyState(client);
             this.resultDurationMs,
           victoryShowcase:
             correctionVictoryShowcase,
-        },
+        }
       );
 
       return;
@@ -5717,9 +5796,8 @@ this.sendPaintReadyState(client);
           ),
     };
 
-    this.broadcast(
-      "round_result",
-      {
+    this.sendRoundResultPersonalized(
+        {
         winner,
         reason,
         revealedHiders,
@@ -5729,8 +5807,8 @@ this.sendPaintReadyState(client);
          * V1010388_SERVER_VICTORY_SHOWCASE: compact metadata only; paint pixels stay client-side.
          */
         victoryShowcase,
-      },
-    );
+      }
+      );
 
     this.updateRoomMetadata();
     this.broadcastPhaseChanged();

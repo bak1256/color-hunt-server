@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010434_HUNTER_PERSONAL_FOUND_ATTRIBUTION: victory card knows which Hunter personally found each Hider. */
   /* V1010427B_TARGETED_RECONNECT_PAINT_SAFE: reconnect full paint is client-targeted; opponents use targeted paint replay. */
   /* V1010390_SERVER_MAP12_16_SAFE_RECOVERY: map1..map16 restored; forest remains lobby-only. */
   /* V1010388_SERVER_VICTORY_SHOWCASE: victory snapshot metadata for social-result cards. */
@@ -466,6 +467,10 @@ export class MyRoom extends Room {
       y: number;
       foundOrder: number;
       foundAt: number;
+      /*
+       * V1010434_HUNTER_PERSONAL_FOUND_ATTRIBUTION: which Hunter actually found this Hider.
+       */
+      foundByHunterSessionId: string;
     }> = [];
 
   messages = {
@@ -2012,6 +2017,8 @@ if (
                 1,
               foundAt:
                 Date.now(),
+              foundByHunterSessionId:
+                client.sessionId,
             });
           }
 
@@ -5580,6 +5587,8 @@ this.sendPaintReadyState(client);
               entry.foundOrder,
             foundAt:
               entry.foundAt,
+            foundByHunterSessionId:
+              entry.foundByHunterSessionId,
           }),
         ),
       survivingHiders:

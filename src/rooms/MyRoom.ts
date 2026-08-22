@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010427B_TARGETED_RECONNECT_PAINT_SAFE: reconnect full paint is client-targeted; opponents use targeted paint replay. */
   /* V1010390_SERVER_MAP12_16_SAFE_RECOVERY: map1..map16 restored; forest remains lobby-only. */
   /* V1010388_SERVER_VICTORY_SHOWCASE: victory snapshot metadata for social-result cards. */
   /* V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT: Paint->Hunt waits for a stable live roster and reconnect convergence. */
@@ -3214,22 +3215,23 @@ this.sendPaintReadyState(client);
                     return;
                   }
 
-                  this.clients.forEach(
-                    (connectedClient) => {
-                      this.sendLobbySnapshot(
-                        connectedClient,
-                      );
+                  /*
+               * V1010427B_TARGETED_RECONNECT_PAINT_SAFE / V86_RECONNECTING_CLIENT_ONLY
+               * Restore old v238.37 stability contract:
+               * full authoritative state goes only to the reconnecting client.
+               */
+              this.sendLobbySnapshot(
+                client,
+              );
 
-                      connectedClient.send(
-                        "round_paint_state",
-                        {
-                          strokes:
-                            [...this.roundPaintStrokes.values()]
-                              .flat(),
-                        },
-                      );
-                    },
-                  );
+              client.send(
+                "round_paint_state",
+                {
+                  strokes:
+                    [...this.roundPaintStrokes.values()]
+                      .flat(),
+                },
+              );
                 },
                 delay,
               );
@@ -3294,8 +3296,13 @@ this.sendPaintReadyState(client);
                   return;
                 }
 
-                this.broadcast(
-                  "round_paint_state",
+                /*
+                   * V1010427B_TARGETED_RECONNECT_PAINT_SAFE / V84_NO_ROOM_WIDE_FULL_PAINT
+                   * Keep syntax/timing intact, but target only this replacement
+                   * client rather than forcing every client to rebuild paint.
+                   */
+                  client.send(
+                    "round_paint_state",
                   {
                     strokes:
                       [...this.roundPaintStrokes.values()]

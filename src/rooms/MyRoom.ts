@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010444_RESULT_IDENTITY_FALLBACK: final result carries both finder and recipient identities. */
   /* V1010440_DIRECT_PERSONAL_FOUND_LEDGER: personal kills are recorded at the shot itself. */
   /*
    * V1010439_PERSONALIZED_ROUND_RESULT
@@ -195,6 +196,14 @@ export class MyRoom extends Room {
                 recipientPlayer?.name ??
                   "Player",
               ).slice(0, 32),
+            /*
+             * V1010444_RESULT_IDENTITY_FALLBACK
+             * Echo the exact identity used by THIS personalized send.
+             * GameScene can deterministically filter team foundHiders even if
+             * direct-event/cache timing ever fails.
+             */
+            recipientSessionId,
+            recipientClientKey,
           },
         },
       );
@@ -5890,6 +5899,8 @@ this.sendPaintReadyState(client);
               entry.foundAt,
             foundByHunterSessionId:
               entry.foundByHunterSessionId,
+            foundByHunterClientKey:
+              entry.foundByHunterClientKey,
             paintStrokes:
               entry.paintStrokes,
           }),

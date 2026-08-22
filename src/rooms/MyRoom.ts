@@ -180,6 +180,43 @@ export class MyRoom extends Room {
           recipientSessionId,
         );
 
+      /*
+       * V1010445_FOUND_RUNTIME_TRACE_SERVER
+       * Temporary runtime trace.  Remove after FOUND pipeline is fixed.
+       */
+      console.log(
+        "[V445 FOUND TRACE]",
+        {
+          recipientSessionId,
+          recipientClientKey,
+          teamFoundCount:
+            teamFound.length,
+          directPersonalFoundCount:
+            directPersonalFound.length,
+          personalFoundHidersCount:
+            personalFoundHiders.length,
+          teamFound:
+            teamFound.map(
+              (entry: any) => ({
+                sessionId:
+                  entry?.sessionId,
+                foundOrder:
+                  entry?.foundOrder,
+                foundByHunterSessionId:
+                  entry?.foundByHunterSessionId,
+                foundByHunterClientKey:
+                  entry?.foundByHunterClientKey,
+                paintCount:
+                  Array.isArray(
+                    entry?.paintStrokes,
+                  )
+                    ? entry.paintStrokes.length
+                    : -1,
+              }),
+            ),
+        },
+      );
+
       resultClient.send(
         "round_result",
         {

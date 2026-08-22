@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010388_SERVER_VICTORY_SHOWCASE: victory snapshot metadata for social-result cards. */
   /* V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT: Paint->Hunt waits for a stable live roster and reconnect convergence. */
   /* V1010364S_P0_MULTIPLAYER_STABILITY: short lobby ghost grace, live-start authority, lower recovery chatter. */
   /* V1010345S_DISCONNECT_GRACE_HARDENING: tolerate transient transport loss before changing round outcome. */
@@ -449,6 +450,21 @@ export class MyRoom extends Room {
 
   private readonly roundPaintStrokes =
     new Map<string, any[]>();
+
+  /*
+   * V1010388_SERVER_VICTORY_SHOWCASE
+   * Keep the exact place/order where each Hider was found.
+   * This survives only until the round result card has been delivered.
+   */
+  private readonly victoryFoundHiders:
+    Array<{
+      sessionId: string;
+      name: string;
+      x: number;
+      y: number;
+      foundOrder: number;
+      foundAt: number;
+    }> = [];
 
   messages = {
     select_hunt_duration: (
@@ -1963,6 +1979,34 @@ if (
           target.role === "hider" &&
           target.alive
         ) {
+          /*
+           * V1010388_SERVER_VICTORY_SHOWCASE
+           * Snapshot BEFORE alive=false so the Hunter victory poster can
+           * recreate the exact hiding spot where this Hider was discovered.
+           */
+          if (
+            !this.victoryFoundHiders.some(
+              (entry) =>
+                entry.sessionId ===
+                hitId,
+            )
+          ) {
+            this.victoryFoundHiders.push({
+              sessionId: hitId,
+              name: String(
+                target.name ??
+                  "Hider",
+              ).slice(0, 32),
+              x: target.x,
+              y: target.y,
+              foundOrder:
+                this.victoryFoundHiders.length +
+                1,
+              foundAt:
+                Date.now(),
+            });
+          }
+
           target.alive = false;
         }
       }
@@ -5208,6 +5252,14 @@ if (
     /* V101082B_CLEAR_ROUND_PAINT */
     this.roundPaintStrokes.clear();
 
+    /*
+     * V1010388_SERVER_VICTORY_SHOWCASE: every Paint phase starts a brand-new victory timeline.
+     */
+    this.victoryFoundHiders.splice(
+      0,
+      this.victoryFoundHiders.length,
+    );
+
     this.paintReadySessionIds.clear();
 
     this.updateRoomMetadata();
@@ -5487,6 +5539,49 @@ if (
           }),
         );
 
+    const victoryShowcase = {
+      activeMap:
+        this.state.activeMap,
+      foundHiders:
+        this.victoryFoundHiders.map(
+          (entry) => ({
+            sessionId:
+              entry.sessionId,
+            name:
+              entry.name,
+            x:
+              entry.x,
+            y:
+              entry.y,
+            foundOrder:
+              entry.foundOrder,
+            foundAt:
+              entry.foundAt,
+          }),
+        ),
+      survivingHiders:
+        [...this.state.players.entries()]
+          .filter(
+            ([, player]) =>
+              player.role === "hider" &&
+              player.alive,
+          )
+          .map(
+            ([sessionId, player]) => ({
+              sessionId,
+              name:
+                String(
+                  player.name ??
+                    "Hider",
+                ).slice(0, 32),
+              x:
+                player.x,
+              y:
+                player.y,
+            }),
+          ),
+    };
+
     this.broadcast(
       "round_result",
       {
@@ -5495,6 +5590,10 @@ if (
         revealedHiders,
         durationMs:
           this.resultDurationMs,
+        /*
+         * V1010388_SERVER_VICTORY_SHOWCASE: compact metadata only; paint pixels stay client-side.
+         */
+        victoryShowcase,
       },
     );
 
@@ -5637,6 +5736,14 @@ if (
         : this.state.selectedMap;
 
     this.hunterRoundStats.clear();
+
+    /*
+     * V1010388_SERVER_VICTORY_SHOWCASE: result has already been broadcast and displayed for 5s.
+     */
+    this.victoryFoundHiders.splice(
+      0,
+      this.victoryFoundHiders.length,
+    );
 
     for (
       const [

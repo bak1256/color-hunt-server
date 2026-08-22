@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010438_STABLE_HUNTER_VICTORY_IDENTITY: victory ownership follows stable clientKey, not transport session. */
   /* V1010436B_VICTORY_FOUND_PAINT_AUTHORITATIVE: authoritative FOUND metadata and paint in every victory path. */
   /* V1010434_HUNTER_PERSONAL_FOUND_ATTRIBUTION: victory card knows which Hunter personally found each Hider. */
   /* V1010427B_TARGETED_RECONNECT_PAINT_SAFE: reconnect full paint is client-targeted; opponents use targeted paint replay. */
@@ -472,6 +473,10 @@ export class MyRoom extends Room {
        * V1010434_HUNTER_PERSONAL_FOUND_ATTRIBUTION: which Hunter actually found this Hider.
        */
       foundByHunterSessionId: string;
+      /*
+       * V1010438_STABLE_HUNTER_VICTORY_IDENTITY: stable tab/player identity. Session IDs can change on reconnect.
+       */
+      foundByHunterClientKey: string;
       /*
        * V1010436B_VICTORY_FOUND_PAINT_AUTHORITATIVE: exact camouflage snapshot captured at hit time.
        */
@@ -2024,6 +2029,10 @@ if (
                 Date.now(),
               foundByHunterSessionId:
                 client.sessionId,
+              foundByHunterClientKey:
+                this.clientKeyBySessionId.get(
+                  client.sessionId,
+                ) ?? "",
               paintStrokes:
                 (
                   this.roundPaintStrokes.get(
@@ -5585,6 +5594,8 @@ this.sendPaintReadyState(client);
                 entry.foundAt,
               foundByHunterSessionId:
                 entry.foundByHunterSessionId,
+              foundByHunterClientKey:
+                entry.foundByHunterClientKey,
               paintStrokes:
                 entry.paintStrokes,
             }),

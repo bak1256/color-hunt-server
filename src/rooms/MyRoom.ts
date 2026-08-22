@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010446_FINISHED_SNAPSHOT_REUSES_FULL_ROUND_RESULT: no legacy stripped round_result may overwrite rich victory data. */
   /* V1010444_RESULT_IDENTITY_FALLBACK: final result carries both finder and recipient identities. */
   /* V1010440_DIRECT_PERSONAL_FOUND_LEDGER: personal kills are recorded at the shot itself. */
   /*
@@ -103,6 +104,13 @@ export class MyRoom extends Room {
   private sendRoundResultPersonalized(
     payload: any,
   ): void {
+    /*
+     * V1010446_FINISHED_SNAPSHOT_REUSES_FULL_ROUND_RESULT / SAVE_AUTHORITATIVE_RESULT
+     * Keep the complete result while phase === "finished".
+     */
+    this.lastRoundResultPayload =
+      payload;
+
     const teamFound =
       Array.isArray(
         payload?.victoryShowcase
@@ -651,6 +659,15 @@ export class MyRoom extends Room {
    */
   private readonly victoryFoundByHunterKey =
     new Map<string, any[]>();
+
+  /*
+   * V1010446_FINISHED_SNAPSHOT_REUSES_FULL_ROUND_RESULT
+   * Full authoritative result retained through the finished phase so
+   * sendLobbySnapshot()/reconnect recovery cannot emit an old stripped result.
+   */
+  private lastRoundResultPayload:
+    any | null =
+    null;
 
 
   messages = {
@@ -4891,20 +4908,125 @@ this.sendPaintReadyState(client);
             }),
           );
 
-      client.send(
-        "round_result",
-        {
-          winner:
-            this.state.winner,
-          revealedHiders,
-          durationMs:
-            Math.max(
-              0,
-              this.state.phaseEndsAt -
-                Date.now(),
-            ),
-        },
-      );
+      /*
+       * V1010446_FINISHED_SNAPSHOT_REUSES_FULL_ROUND_RESULT / NO_STRIPPED_FINISHED_RESULT
+       *
+       * Old code resent only winner/revealedHiders/durationMs here.
+       * That packet erased victoryShowcase on clients and produced 0 FOUND.
+       * Re-send the same rich result shape used by finishGame(), personalized
+       * for this exact client.
+       */
+      const savedPayload =
+        this.lastRoundResultPayload;
+
+      if (savedPayload) {
+        const teamFound =
+          Array.isArray(
+            savedPayload?.victoryShowcase
+              ?.foundHiders,
+          )
+            ? savedPayload.victoryShowcase
+                .foundHiders
+            : [];
+
+        const recipientSessionId =
+          client.sessionId;
+
+        const recipientClientKey =
+          this.clientKeyBySessionId.get(
+            recipientSessionId,
+          ) ?? "";
+
+        const recipientLedgerKey =
+          recipientClientKey
+            ? "key:" +
+              recipientClientKey
+            : "session:" +
+              recipientSessionId;
+
+        const directPersonalFound =
+          this.victoryFoundByHunterKey.get(
+            recipientLedgerKey,
+          ) ??
+          this.victoryFoundByHunterKey.get(
+            "session:" +
+              recipientSessionId,
+          ) ??
+          [];
+
+        const personalFoundHiders =
+          directPersonalFound.length > 0
+            ? directPersonalFound
+            : teamFound.filter(
+                (entry: any) => {
+                  const finderClientKey =
+                    String(
+                      entry
+                        ?.foundByHunterClientKey ??
+                        "",
+                    );
+
+                  if (
+                    recipientClientKey &&
+                    finderClientKey
+                  ) {
+                    return (
+                      finderClientKey ===
+                      recipientClientKey
+                    );
+                  }
+
+                  return (
+                    String(
+                      entry
+                        ?.foundByHunterSessionId ??
+                        "",
+                    ) ===
+                    recipientSessionId
+                  );
+                },
+              );
+
+        const recipientPlayer =
+          this.state.players.get(
+            recipientSessionId,
+          );
+
+        client.send(
+          "round_result",
+          {
+            ...savedPayload,
+            durationMs:
+              Math.max(
+                0,
+                this.state.phaseEndsAt -
+                  Date.now(),
+              ),
+            revealedHiders:
+              Array.isArray(
+                savedPayload
+                  ?.revealedHiders,
+              )
+                ? savedPayload.revealedHiders
+                : revealedHiders,
+            victoryShowcase: {
+              ...(
+                savedPayload
+                  ?.victoryShowcase ??
+                {}
+              ),
+              personalFoundHiders,
+              recipientName:
+                String(
+                  recipientPlayer?.name ??
+                    "Player",
+                ).slice(0, 32),
+              recipientSessionId,
+              recipientClientKey,
+            },
+          },
+        );
+      }
     }
 
     /* V101077_RECONNECT_MULTI_PULSE */
@@ -6012,6 +6134,8 @@ this.sendPaintReadyState(client);
     this.poopLaughTriggeredHunters.clear();
     this.state.phase = "lobby";
     this.state.phaseEndsAt = 0;
+    this.lastRoundResultPayload =
+      null;
 
     this.hunterDisconnectOutcomeGeneration += 1;
     this.allHiderDisconnectOutcomeGeneration += 1;

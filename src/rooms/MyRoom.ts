@@ -2256,8 +2256,8 @@ if (
       client: Client,
     ): void => {
       /* V101072_READY_REQUEST_PHASE_RECOVERY */
-      this.sendLobbySnapshot(client);
-      this.sendPaintReadyState(client);
+/* V1010424_RESTORE_LARGE_ROOM_SERVER_BUDGET / READY_NARROW_RESPONSE */
+this.sendPaintReadyState(client);
     },
 
     paint_stroke: (
@@ -2747,6 +2747,15 @@ if (
     options: JoinOptions,
   ): void {
     this.autoDispose = true;
+
+    /*
+     * V1010424_RESTORE_LARGE_ROOM_SERVER_BUDGET
+     * Restore the known-good 3-10 player room transport budget.
+     * 66ms ~= 15Hz room-wide Schema patch fanout.
+     */
+    this.setPatchRate(
+      66,
+    );
 
     /*
      * clock timeout이 어떤 이유로 지연되더라도 phaseEndsAt을 기준으로

@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010436B_VICTORY_FOUND_PAINT_AUTHORITATIVE: authoritative FOUND metadata and paint in every victory path. */
   /* V1010434_HUNTER_PERSONAL_FOUND_ATTRIBUTION: victory card knows which Hunter personally found each Hider. */
   /* V1010427B_TARGETED_RECONNECT_PAINT_SAFE: reconnect full paint is client-targeted; opponents use targeted paint replay. */
   /* V1010390_SERVER_MAP12_16_SAFE_RECOVERY: map1..map16 restored; forest remains lobby-only. */
@@ -471,6 +472,10 @@ export class MyRoom extends Room {
        * V1010434_HUNTER_PERSONAL_FOUND_ATTRIBUTION: which Hunter actually found this Hider.
        */
       foundByHunterSessionId: string;
+      /*
+       * V1010436B_VICTORY_FOUND_PAINT_AUTHORITATIVE: exact camouflage snapshot captured at hit time.
+       */
+      paintStrokes: any[];
     }> = [];
 
   messages = {
@@ -2019,6 +2024,29 @@ if (
                 Date.now(),
               foundByHunterSessionId:
                 client.sessionId,
+              paintStrokes:
+                (
+                  this.roundPaintStrokes.get(
+                    hitId,
+                  ) ?? []
+                ).map(
+                  (stroke: any) => ({
+                    ...stroke,
+                    points:
+                      Array.isArray(
+                        stroke.points,
+                      )
+                        ? stroke.points.map(
+                            (point: any) => ({
+                              x:
+                                Number(point.x) || 0,
+                              y:
+                                Number(point.y) || 0,
+                            }),
+                          )
+                        : [],
+                  }),
+                ),
             });
           }
 
@@ -5516,11 +5544,73 @@ this.sendPaintReadyState(client);
       this.state.winner =
         "hunters";
 
+      /*
+       * V1010436B_VICTORY_FOUND_PAINT_AUTHORITATIVE / COMPLETE_STALE_WINNER_CORRECTION
+       * A winner-only correction creates a 0 FOUND victory card.
+       * Send the complete authoritative result instead.
+       */
+      const correctionRevealedHiders =
+        [...this.state.players.entries()]
+          .filter(
+            ([, player]) =>
+              player.role === "hider",
+          )
+          .map(
+            ([sessionId, player]) => ({
+              sessionId,
+              x:
+                player.x,
+              y:
+                player.y,
+            }),
+          );
+
+      const correctionVictoryShowcase = {
+        activeMap:
+          this.state.activeMap,
+        foundHiders:
+          this.victoryFoundHiders.map(
+            (entry) => ({
+              sessionId:
+                entry.sessionId,
+              name:
+                entry.name,
+              x:
+                entry.x,
+              y:
+                entry.y,
+              foundOrder:
+                entry.foundOrder,
+              foundAt:
+                entry.foundAt,
+              foundByHunterSessionId:
+                entry.foundByHunterSessionId,
+              paintStrokes:
+                entry.paintStrokes,
+            }),
+          ),
+        survivingHiders:
+          [] as Array<{
+            sessionId: string;
+            name?: string;
+            x: number;
+            y: number;
+          }>,
+      };
+
       this.broadcast(
         "round_result",
         {
           winner:
             "hunters",
+          reason:
+            "all_hiders_found",
+          revealedHiders:
+            correctionRevealedHiders,
+          durationMs:
+            this.resultDurationMs,
+          victoryShowcase:
+            correctionVictoryShowcase,
         },
       );
 
@@ -5589,6 +5679,8 @@ this.sendPaintReadyState(client);
               entry.foundAt,
             foundByHunterSessionId:
               entry.foundByHunterSessionId,
+            paintStrokes:
+              entry.paintStrokes,
           }),
         ),
       survivingHiders:

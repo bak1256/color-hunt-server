@@ -2792,6 +2792,54 @@ if (
     );
     this.markConnectionTopologyChanged();
 
+    /*
+     * V1010387_SERVER_FULL_ROOM_HARD_GUARD
+     *
+     * Colyseus maxClients=10 is already the primary capacity guard.
+     * This is a second defensive boundary: even if a transport race or
+     * future framework/config change ever lets an extra live transport reach
+     * onJoin(), it is rejected before PlayerState creation.
+     */
+    if (
+      this.liveSessionIds.size >
+      this.maxClients
+    ) {
+      client.send(
+        "join_rejected",
+        {
+          reason: "room_full",
+          playerCount:
+            this.maxClients,
+          maxClients:
+            this.maxClients,
+          returnToLobby: true,
+        },
+      );
+
+      this.liveSessionIds.delete(
+        client.sessionId,
+      );
+
+      this.updateRoomMetadata();
+      this.syncRoomListingVisibility();
+
+      this.clock.setTimeout(
+        () => {
+          try {
+            client.leave(
+              4002,
+              "room_full",
+            );
+          } catch {
+            // Transport may already be gone.
+          }
+        },
+        0,
+      );
+
+      return;
+    }
+
     this.syncRoomListingVisibility();
 
     console.log(

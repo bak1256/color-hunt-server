@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010447_RESTORE_LOBBY_READY_SERVER_CONTRACT: main server again matches the client's lobby READY contract. */
   /* V1010446_FINISHED_SNAPSHOT_REUSES_FULL_ROUND_RESULT: no legacy stripped round_result may overwrite rich victory data. */
   /* V1010444_RESULT_IDENTITY_FALLBACK: final result carries both finder and recipient identities. */
   /* V1010440_DIRECT_PERSONAL_FOUND_LEDGER: personal kills are recorded at the shot itself. */
@@ -507,6 +508,13 @@ export class MyRoom extends Room {
   private readonly paintReadySessionIds =
     new Set<string>();
 
+  /*
+   * V1010447_RESTORE_LOBBY_READY_SERVER_CONTRACT
+   * Lobby READY belongs to every live non-host player.
+   */
+  private readonly lobbyReadySessionIds =
+    new Set<string>();
+
   private lastPaintReadyPulseAt = 0;
 
   private readonly maxHunterReserve = 12;
@@ -586,6 +594,8 @@ export class MyRoom extends Room {
           this.state.phaseEndsAt,
         serverNow:
           Date.now(),
+        lobbyReadyState:
+          this.getLobbyReadyState(),
         paintReadyState:
           this.getPaintReadyState(),
         players:
@@ -1298,6 +1308,56 @@ export class MyRoom extends Room {
       );
     },
 
+    /*
+     * V1010447_RESTORE_LOBBY_READY_SERVER_CONTRACT
+     * Guests toggle READY; host never enters the READY set.
+     */
+    lobby_ready: (
+      client: Client,
+      message: {
+        ready?: boolean;
+      },
+    ): void => {
+      this.ensureValidHost();
+
+      if (
+        this.state.phase !== "lobby" ||
+        client.sessionId ===
+          this.state.hostId ||
+        !this.liveSessionIds.has(
+          client.sessionId,
+        ) ||
+        this.supersededSessionIds.has(
+          client.sessionId,
+        ) ||
+        !this.state.players.has(
+          client.sessionId,
+        )
+      ) {
+        return;
+      }
+
+      if (Boolean(message?.ready)) {
+        this.lobbyReadySessionIds.add(
+          client.sessionId,
+        );
+      } else {
+        this.lobbyReadySessionIds.delete(
+          client.sessionId,
+        );
+      }
+
+      this.broadcastLobbyReadyState();
+    },
+
+    request_lobby_ready_state: (
+      client: Client,
+    ): void => {
+      this.sendLobbyReadyState(
+        client,
+      );
+    },
+
     request_lobby_snapshot: (
       client: Client,
     ): void => {
@@ -1491,6 +1551,27 @@ export class MyRoom extends Room {
             message:
               "대기실 동기화 중입니다. 잠시 후 다시 시작해주세요.",
           },
+        );
+        return;
+      }
+
+      /*
+       * V1010447_RESTORE_LOBBY_READY_SERVER_CONTRACT / AUTHORITATIVE_START_BARRIER
+       * Every connected non-host player must be READY.
+       */
+      const lobbyReadyState =
+        this.getLobbyReadyState();
+
+      if (!lobbyReadyState.canStart) {
+        client.send(
+          "start_game_error",
+          {
+            message:
+              "모든 참가자가 준비완료한 뒤 시작할 수 있습니다.",
+          },
+        );
+        this.sendLobbyReadyState(
+          client,
         );
         return;
       }
@@ -5078,6 +5159,9 @@ this.sendPaintReadyState(client);
     this.liveSessionIds.delete(
       client.sessionId,
     );
+    this.lobbyReadySessionIds.delete(
+      client.sessionId,
+    );
     this.markConnectionTopologyChanged();
 
     /*
@@ -6230,6 +6314,7 @@ this.sendPaintReadyState(client);
     this.lobbyStartAllowedAt = Date.now() + 1_000;
     /* V101069_READY_RESET */
     this.paintReadySessionIds.clear();
+    this.lobbyReadySessionIds.clear();
 
     /*
      * 선택값은 다음 라운드에도 유지하되,
@@ -6294,6 +6379,135 @@ this.sendPaintReadyState(client);
      * now dispose the resulting empty lobby as well.
      */
     this.disposeEmptyLobbySoon();
+  }
+
+  /*
+   * V1010447_RESTORE_LOBBY_READY_SERVER_CONTRACT
+   * READY total = current live players except the host.
+   * Reconnect-reserved/ghost/superseded sessions never block a fresh lobby.
+   */
+  private getLobbyReadyState(): {
+    readySessionIds: string[];
+    readyCount: number;
+    totalCount: number;
+    allReady: boolean;
+    canStart: boolean;
+    livePlayerCount: number;
+    hasDisconnectedPlayers: boolean;
+  } {
+    this.ensureValidHost();
+
+    const livePlayerIds =
+      [...this.liveSessionIds]
+        .filter(
+          (sessionId) =>
+            this.state.players.has(
+              sessionId,
+            ) &&
+            !this.supersededSessionIds.has(
+              sessionId,
+            ),
+        );
+
+    const livePlayerSet =
+      new Set(livePlayerIds);
+
+    const eligibleReadyIds =
+      livePlayerIds.filter(
+        (sessionId) =>
+          sessionId !==
+            this.state.hostId,
+      );
+
+    const eligibleReadySet =
+      new Set(eligibleReadyIds);
+
+    /*
+     * Remove stale READY ownership whenever a player leaves, reconnects with
+     * another sessionId, or becomes host.
+     */
+    for (
+      const sessionId of
+      [...this.lobbyReadySessionIds]
+    ) {
+      if (
+        !eligibleReadySet.has(
+          sessionId,
+        )
+      ) {
+        this.lobbyReadySessionIds.delete(
+          sessionId,
+        );
+      }
+    }
+
+    const readySessionIds =
+      eligibleReadyIds.filter(
+        (sessionId) =>
+          this.lobbyReadySessionIds.has(
+            sessionId,
+          ),
+      );
+
+    const totalCount =
+      eligibleReadyIds.length;
+
+    const readyCount =
+      readySessionIds.length;
+
+    const livePlayerCount =
+      livePlayerIds.length;
+
+    /*
+     * A state.players actor without a live transport is a reconnect reservation,
+     * not a participant for the next lobby round.
+     */
+    const hasDisconnectedPlayers =
+      [...this.state.players.keys()]
+        .some(
+          (sessionId) =>
+            !livePlayerSet.has(
+              sessionId,
+            ) &&
+            !this.supersededSessionIds.has(
+              sessionId,
+            ),
+        );
+
+    const allReady =
+      totalCount > 0 &&
+      readyCount ===
+        totalCount;
+
+    return {
+      readySessionIds,
+      readyCount,
+      totalCount,
+      allReady,
+      canStart:
+        this.state.phase === "lobby" &&
+        livePlayerCount >= 2 &&
+        allReady,
+      livePlayerCount,
+      hasDisconnectedPlayers,
+    };
+  }
+
+  private sendLobbyReadyState(
+    client: Client,
+  ): void {
+    client.send(
+      "lobby_ready_state",
+      this.getLobbyReadyState(),
+    );
+  }
+
+  private broadcastLobbyReadyState():
+    void {
+    this.broadcast(
+      "lobby_ready_state",
+      this.getLobbyReadyState(),
+    );
   }
 
   private getPaintReadyState(): {

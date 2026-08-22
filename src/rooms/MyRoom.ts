@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010390_SERVER_MAP12_16_SAFE_RECOVERY: map1..map16 restored; forest remains lobby-only. */
   /* V1010388_SERVER_VICTORY_SHOWCASE: victory snapshot metadata for social-result cards. */
   /* V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT: Paint->Hunt waits for a stable live roster and reconnect convergence. */
   /* V1010364S_P0_MULTIPLAYER_STABILITY: short lobby ghost grace, live-start authority, lower recovery chatter. */
@@ -1181,9 +1182,14 @@ export class MyRoom extends Room {
           message.map ?? "",
         );
 
+      /*
+       * V1010390_SERVER_MAP12_16_SAFE_RECOVERY
+       * forest is lobby-only and must never be accepted as a playable map.
+       * Valid round maps: map1..map16, plus "random".
+       */
       const valid =
         requested === "random" ||
-        /^map(?:[1-9]|1[01])$/.test(
+        /^map(?:[1-9]|1[0-6])$/.test(
           requested,
         );
 
@@ -1361,14 +1367,15 @@ export class MyRoom extends Room {
           "random"
       ) {
         /*
-         * Pick from all 11 maps except the map used by the immediately
-         * previous RANDOM round. This guarantees RANDOM never gives the same
-         * map twice in a row while keeping every other map equally likely.
+         * Pick from all 16 playable maps except the map used by the
+         * immediately previous RANDOM round. Forest is lobby-only and is
+         * intentionally excluded. This guarantees RANDOM never gives the same
+         * map twice in a row while keeping every playable map equally likely.
          */
         const randomCandidates =
           Array.from(
             {
-              length: 11,
+              length: 16,
             },
             (
               _,

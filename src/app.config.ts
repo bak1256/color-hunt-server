@@ -11,6 +11,7 @@ import {
 import { MyRoom } from "./rooms/MyRoom.js";
 
 /* V1010371_CORS_MATCHMAKING_RECOVERY: Vercel <-> Render CORS/OPTIONS restored for API + Colyseus matchmaking. */
+/* V1010435_ROOM_STATUS_CAPACITY: /api/room-status exposes safe capacity for invite/full-room guards. */
 const server = defineServer({
     rooms: {
         chameleon_hunt: defineRoom(MyRoom),
@@ -211,6 +212,8 @@ const server = defineServer({
                             | {
                                   phase?: string;
                                   isPrivate?: boolean;
+                                  playerCount?: number;
+                                  maxClients?: number;
                               }
                             | undefined;
 
@@ -224,6 +227,24 @@ const server = defineServer({
                         isPrivate:
                             metadata?.isPrivate ===
                             true,
+                        /*
+                         * V1010435_ROOM_STATUS_CAPACITY
+                         * Expose joinability-only capacity. No password/private
+                         * room secret is returned.
+                         */
+                        clients:
+                            room.clients,
+                        playerCount:
+                            Number(
+                                metadata?.playerCount ??
+                                room.clients,
+                            ),
+                        maxClients:
+                            Number(
+                                metadata?.maxClients ??
+                                room.maxClients ??
+                                10,
+                            ),
                     });
                 } catch (error) {
                     console.error(

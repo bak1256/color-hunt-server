@@ -88,6 +88,7 @@ type RoundEndReason =
   | "ammo_depleted";
 
 export class MyRoom extends Room {
+  /* V1010440_DIRECT_PERSONAL_FOUND_LEDGER: personal kills are recorded at the shot itself. */
   /*
    * V1010439_PERSONALIZED_ROUND_RESULT
    *
@@ -119,35 +120,63 @@ export class MyRoom extends Room {
           recipientSessionId,
         ) ?? "";
 
+      /*
+       * V1010440_DIRECT_PERSONAL_FOUND_LEDGER / RESULT_PERSONAL_LEDGER
+       * Prefer the hit-time ledger. Legacy entry filtering remains fallback.
+       */
+      const recipientLedgerKey =
+        recipientClientKey
+          ? "key:" +
+            recipientClientKey
+          : "session:" +
+            recipientSessionId;
+
+      const directPersonalFound =
+        this.victoryFoundByHunterKey.get(
+          recipientLedgerKey,
+        ) ??
+        this.victoryFoundByHunterKey.get(
+          "session:" +
+            recipientSessionId,
+        ) ??
+        [];
+
       const personalFoundHiders =
-        teamFound.filter(
-          (entry: any) => {
-            const finderClientKey =
-              String(
-                entry
-                  ?.foundByHunterClientKey ??
-                  "",
-              );
+        directPersonalFound.length > 0
+          ? directPersonalFound
+          : teamFound.filter(
+              (entry: any) => {
+                const finderClientKey =
+                  String(
+                    entry
+                      ?.foundByHunterClientKey ??
+                      "",
+                  );
 
-            if (
-              recipientClientKey &&
-              finderClientKey
-            ) {
-              return (
-                finderClientKey ===
-                recipientClientKey
-              );
-            }
+                if (
+                  recipientClientKey &&
+                  finderClientKey
+                ) {
+                  return (
+                    finderClientKey ===
+                    recipientClientKey
+                  );
+                }
 
-            return (
-              String(
-                entry
-                  ?.foundByHunterSessionId ??
-                  "",
-              ) ===
-              recipientSessionId
+                return (
+                  String(
+                    entry
+                      ?.foundByHunterSessionId ??
+                      "",
+                  ) ===
+                  recipientSessionId
+                );
+              },
             );
-          },
+
+      const recipientPlayer =
+        this.state.players.get(
+          recipientSessionId,
         );
 
       resultClient.send(
@@ -161,6 +190,11 @@ export class MyRoom extends Room {
               {}
             ),
             personalFoundHiders,
+            recipientName:
+              String(
+                recipientPlayer?.name ??
+                  "Player",
+              ).slice(0, 32),
           },
         },
       );
@@ -562,6 +596,16 @@ export class MyRoom extends Room {
        */
       paintStrokes: any[];
     }> = [];
+
+  /*
+   * V1010440_DIRECT_PERSONAL_FOUND_LEDGER
+   * Direct per-Hunter victory ledger.
+   * Key = stable clientKey when available, otherwise current sessionId.
+   * This is independent from team-wide victoryFoundHiders.
+   */
+  private readonly victoryFoundByHunterKey =
+    new Map<string, any[]>();
+
 
   messages = {
     select_hunt_duration: (
@@ -2137,6 +2181,81 @@ if (
                   }),
                 ),
             });
+
+            /*
+             * V1010440_DIRECT_PERSONAL_FOUND_LEDGER / HIT_TIME_PERSONAL_ENTRY
+             * The shooter itself is the authority for personal ownership here.
+             */
+            const personalVictoryEntry =
+              this.victoryFoundHiders[
+                this.victoryFoundHiders.length -
+                  1
+              ];
+
+            const hunterStableKey =
+              this.clientKeyBySessionId.get(
+                client.sessionId,
+              ) ?? "";
+
+            const hunterLedgerKey =
+              hunterStableKey
+                ? "key:" +
+                  hunterStableKey
+                : "session:" +
+                  client.sessionId;
+
+            const personalLedger =
+              this.victoryFoundByHunterKey.get(
+                hunterLedgerKey,
+              ) ?? [];
+
+            if (
+              personalVictoryEntry &&
+              !personalLedger.some(
+                (entry: any) =>
+                  entry.sessionId ===
+                  hitId,
+              )
+            ) {
+              const directEntry = {
+                ...personalVictoryEntry,
+                paintStrokes:
+                  Array.isArray(
+                    personalVictoryEntry
+                      .paintStrokes,
+                  )
+                    ? personalVictoryEntry
+                        .paintStrokes
+                    : (
+                        this.roundPaintStrokes.get(
+                          hitId,
+                        ) ?? []
+                      ),
+              };
+
+              personalLedger.push(
+                directEntry,
+              );
+
+              this.victoryFoundByHunterKey.set(
+                hunterLedgerKey,
+                personalLedger,
+              );
+
+              /*
+               * Direct, recipient-only event.
+               * This completely avoids session/clientKey guessing in the card.
+               */
+              client.send(
+                "hunter_personal_found",
+                {
+                  entry:
+                    directEntry,
+                  count:
+                    personalLedger.length,
+                },
+              );
+            }
           }
 
           target.alive = false;
@@ -5407,6 +5526,8 @@ this.sendPaintReadyState(client);
       this.victoryFoundHiders.length,
     );
 
+    this.victoryFoundByHunterKey.clear();
+
     this.paintReadySessionIds.clear();
 
     this.updateRoomMetadata();
@@ -5957,6 +6078,8 @@ this.sendPaintReadyState(client);
       0,
       this.victoryFoundHiders.length,
     );
+
+    this.victoryFoundByHunterKey.clear();
 
     for (
       const [

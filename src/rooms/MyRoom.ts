@@ -1,3 +1,7 @@
+/* V1010450ZF2_RECONNECT_LOOP_HOTFIX:
+ * restore live-socket public listing + 8s Lobby reconnect window.
+ */
+/* V1010450ZF_RECONNECT_LOOP_HOTFIX: revert preserved-seat listing / 90s host Lobby reservation. */
 import {
   Client,
   CloseCode,
@@ -206,45 +210,25 @@ export class MyRoom extends Room {
 
   private syncRoomListingVisibility(): void {
     /*
-     * V1010450ZE_MINIMIZED_HOST_LISTING_GRACE
+     * V1010450ZF2_LIVE_SOCKET_LISTING_AUTHORITY
      *
-     * Browser minimize/background can briefly drop the host transport while
-     * Colyseus still owns a valid reconnection reservation. Hiding the public
-     * room immediately makes it disappear from the Lobby even though the room
-     * is still alive.
-     *
-     * During Lobby, keep a public room listed while a preserved player seat
-     * still exists. Once reconnection expires, onLeave removes the player and
-     * this function hides the truly empty room.
+     * Public room visibility follows REAL live transports only.
+     * Reconnect-preserved state.players must not advertise a room when
+     * no socket is actually connected.
      */
     const liveCount =
       this.liveSessionIds.size;
 
-    const preservedSeatCount =
-      this.state.players.size;
-
-    const hasReconnectableLobbySeat =
-      this.state.phase === "lobby" &&
-      preservedSeatCount > 0;
-
     const shouldHide =
       this.state.isPrivate ||
-      (
-        liveCount === 0 &&
-        !hasReconnectableLobbySeat
-      );
+      liveCount === 0;
 
     this.setPrivate(
       shouldHide,
     );
 
-    /*
-     * Do not publish fake 0-player metadata during a temporary host drop.
-     * Keep the authoritative preserved seat count until the reservation ends.
-     */
     if (
-      liveCount === 0 &&
-      !hasReconnectableLobbySeat
+      liveCount === 0
     ) {
       this.setMetadata({
         ...(this.metadata ?? {}),
@@ -253,7 +237,6 @@ export class MyRoom extends Room {
       });
     }
   }
-
   private readonly clientKeyBySessionId =
     new Map<string, string>();
 
@@ -4341,19 +4324,12 @@ this.sendPaintReadyState(client);
        * is common and the existing round-outcome grace already handles absence.
        */
       /*
-       * V1010450ZE_MINIMIZED_HOST_LISTING_GRACE
-       * Guests still disappear quickly from an idle Lobby, but the HOST gets
-       * a longer seat reservation so a minimized desktop browser does not make
-       * the public room vanish after only eight seconds.
+       * V1010450ZF_RESTORE_LOBBY_RECONNECT_WINDOW
+       * Restore the proven Lobby reconnect behavior.
        */
       const reconnectSeconds =
         this.state.phase === "lobby"
-          ? (
-              client.sessionId ===
-                this.state.hostId
-                ? 90
-                : 8
-            )
+          ? 8
           : 300;
 
       await this.allowReconnection(

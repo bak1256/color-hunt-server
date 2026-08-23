@@ -1,3 +1,4 @@
+/* V1010451G_FULL_ASSIST_VICTORY_HISTORY: retain complete Paint Help history for authoritative Hunter victory snapshots. */
 /* V1010451D_LOBBY_READY_ROSTER_BROADCAST: broadcast authoritative READY roster on join/leave/reconnect. */
 /* V1010451C_RESTORE_READY_CONTRACT_FIXED: fixed restoration of authoritative Lobby READY contract. */
 /* V1010450ZF2_RECONNECT_LOOP_HOTFIX:
@@ -2420,14 +2421,29 @@ this.sendPaintReadyState(client);
         storedStroke,
       );
 
+      /*
+       * V1010451G_FULL_ASSIST_VICTORY_HISTORY
+       *
+       * An 80x120 Paint Help projection can legitimately contain hundreds of
+       * colour/size buckets on detailed maps. 500 was too small and erased the
+       * oldest assist strokes (often the head/top of the avatar) before the
+       * Hunter victory snapshot was captured.
+       *
+       * 2400 is still bounded, but large enough for the complete helper paint
+       * plus normal manual corrections. The existing 300-points-per-message
+       * validation remains unchanged.
+       */
+      const maxRoundPaintStrokesPerTarget =
+        2400;
+
       if (
         targetHistory.length >
-        500
+        maxRoundPaintStrokesPerTarget
       ) {
         targetHistory.splice(
           0,
           targetHistory.length -
-            500,
+            maxRoundPaintStrokesPerTarget,
         );
       }
 

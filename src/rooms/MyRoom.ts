@@ -87,180 +87,8 @@ type RoundEndReason =
   | "timeout"
   | "ammo_depleted";
 
+/* V1010450ZE_MINIMIZED_HOST_LISTING_GRACE: preserve public Lobby listing during temporary minimized-host reconnect. */
 export class MyRoom extends Room {
-  /* V1010447_RESTORE_LOBBY_READY_SERVER_CONTRACT: main server again matches the client's lobby READY contract. */
-  /* V1010446_FINISHED_SNAPSHOT_REUSES_FULL_ROUND_RESULT: no legacy stripped round_result may overwrite rich victory data. */
-  /* V1010444_RESULT_IDENTITY_FALLBACK: final result carries both finder and recipient identities. */
-  /* V1010440_DIRECT_PERSONAL_FOUND_LEDGER: personal kills are recorded at the shot itself. */
-  /*
-   * V1010439_PERSONALIZED_ROUND_RESULT
-   *
-   * round_result used to be identical for every Hunter and the browser then
-   * attempted to match foundByHunterSessionId/clientKey locally. That is fragile
-   * across reconnect/session replacement and produced 0 FOUND.
-   *
-   * Send the SAME authoritative team result to every client, but append a
-   * recipient-specific personalFoundHiders array on the server.
-   */
-  private sendRoundResultPersonalized(
-    payload: any,
-  ): void {
-    /*
-     * V1010446_FINISHED_SNAPSHOT_REUSES_FULL_ROUND_RESULT / SAVE_AUTHORITATIVE_RESULT
-     * Keep the complete result while phase === "finished".
-     */
-    this.lastRoundResultPayload =
-      payload;
-
-    const teamFound =
-      Array.isArray(
-        payload?.victoryShowcase
-          ?.foundHiders,
-      )
-        ? payload.victoryShowcase
-            .foundHiders
-        : [];
-
-    for (const resultClient of this.clients) {
-      const recipientSessionId =
-        resultClient.sessionId;
-
-      const recipientClientKey =
-        this.clientKeyBySessionId.get(
-          recipientSessionId,
-        ) ?? "";
-
-      /*
-       * V1010440_DIRECT_PERSONAL_FOUND_LEDGER / RESULT_PERSONAL_LEDGER
-       * Prefer the hit-time ledger. Legacy entry filtering remains fallback.
-       */
-      const recipientLedgerKey =
-        recipientClientKey
-          ? "key:" +
-            recipientClientKey
-          : "session:" +
-            recipientSessionId;
-
-      const directPersonalFound =
-        this.victoryFoundByHunterKey.get(
-          recipientLedgerKey,
-        ) ??
-        this.victoryFoundByHunterKey.get(
-          "session:" +
-            recipientSessionId,
-        ) ??
-        [];
-
-      const personalFoundHiders =
-        directPersonalFound.length > 0
-          ? directPersonalFound
-          : teamFound.filter(
-              (entry: any) => {
-                const finderClientKey =
-                  String(
-                    entry
-                      ?.foundByHunterClientKey ??
-                      "",
-                  );
-
-                if (
-                  recipientClientKey &&
-                  finderClientKey
-                ) {
-                  return (
-                    finderClientKey ===
-                    recipientClientKey
-                  );
-                }
-
-                return (
-                  String(
-                    entry
-                      ?.foundByHunterSessionId ??
-                      "",
-                  ) ===
-                  recipientSessionId
-                );
-              },
-            );
-
-      const recipientPlayer =
-        this.state.players.get(
-          recipientSessionId,
-        );
-
-      /*
-       * V1010445_FOUND_RUNTIME_TRACE_SERVER
-       * Temporary runtime trace.  Remove after FOUND pipeline is fixed.
-       */
-      console.log(
-        "[V445 FOUND TRACE]",
-        {
-          recipientSessionId,
-          recipientClientKey,
-          teamFoundCount:
-            teamFound.length,
-          directPersonalFoundCount:
-            directPersonalFound.length,
-          personalFoundHidersCount:
-            personalFoundHiders.length,
-          teamFound:
-            teamFound.map(
-              (entry: any) => ({
-                sessionId:
-                  entry?.sessionId,
-                foundOrder:
-                  entry?.foundOrder,
-                foundByHunterSessionId:
-                  entry?.foundByHunterSessionId,
-                foundByHunterClientKey:
-                  entry?.foundByHunterClientKey,
-                paintCount:
-                  Array.isArray(
-                    entry?.paintStrokes,
-                  )
-                    ? entry.paintStrokes.length
-                    : -1,
-              }),
-            ),
-        },
-      );
-
-      resultClient.send(
-        "round_result",
-        {
-          ...payload,
-          victoryShowcase: {
-            ...(
-              payload
-                ?.victoryShowcase ??
-              {}
-            ),
-            personalFoundHiders,
-            recipientName:
-              String(
-                recipientPlayer?.name ??
-                  "Player",
-              ).slice(0, 32),
-            /*
-             * V1010444_RESULT_IDENTITY_FALLBACK
-             * Echo the exact identity used by THIS personalized send.
-             * GameScene can deterministically filter team foundHiders even if
-             * direct-event/cache timing ever fails.
-             */
-            recipientSessionId,
-            recipientClientKey,
-          },
-        },
-      );
-    }
-  }
-
-
-  /* V1010438_STABLE_HUNTER_VICTORY_IDENTITY: victory ownership follows stable clientKey, not transport session. */
-  /* V1010436B_VICTORY_FOUND_PAINT_AUTHORITATIVE: authoritative FOUND metadata and paint in every victory path. */
-  /* V1010434_HUNTER_PERSONAL_FOUND_ATTRIBUTION: victory card knows which Hunter personally found each Hider. */
-  /* V1010427B_TARGETED_RECONNECT_PAINT_SAFE: reconnect full paint is client-targeted; opponents use targeted paint replay. */
   /* V1010390_SERVER_MAP12_16_SAFE_RECOVERY: map1..map16 restored; forest remains lobby-only. */
   /* V1010388_SERVER_VICTORY_SHOWCASE: victory snapshot metadata for social-result cards. */
   /* V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT: Paint->Hunt waits for a stable live roster and reconnect convergence. */
@@ -378,28 +206,45 @@ export class MyRoom extends Room {
 
   private syncRoomListingVisibility(): void {
     /*
-     * v0.10.10.238.4:
-     * Room-list authority is based on REAL connected transports, never on
-     * reconnect-preserved state.players. A room with 0 live clients must
-     * always disappear from the public lobby immediately.
+     * V1010450ZE_MINIMIZED_HOST_LISTING_GRACE
+     *
+     * Browser minimize/background can briefly drop the host transport while
+     * Colyseus still owns a valid reconnection reservation. Hiding the public
+     * room immediately makes it disappear from the Lobby even though the room
+     * is still alive.
+     *
+     * During Lobby, keep a public room listed while a preserved player seat
+     * still exists. Once reconnection expires, onLeave removes the player and
+     * this function hides the truly empty room.
      */
     const liveCount =
       this.liveSessionIds.size;
 
+    const preservedSeatCount =
+      this.state.players.size;
+
+    const hasReconnectableLobbySeat =
+      this.state.phase === "lobby" &&
+      preservedSeatCount > 0;
+
     const shouldHide =
       this.state.isPrivate ||
-      liveCount === 0;
+      (
+        liveCount === 0 &&
+        !hasReconnectableLobbySeat
+      );
 
     this.setPrivate(
       shouldHide,
     );
 
     /*
-     * Keep metadata in agreement with listing visibility so the HTTP room
-     * list can never advertise stale "0 / 10" public entries.
+     * Do not publish fake 0-player metadata during a temporary host drop.
+     * Keep the authoritative preserved seat count until the reservation ends.
      */
     if (
-      liveCount === 0
+      liveCount === 0 &&
+      !hasReconnectableLobbySeat
     ) {
       this.setMetadata({
         ...(this.metadata ?? {}),
@@ -508,13 +353,6 @@ export class MyRoom extends Room {
   private readonly paintReadySessionIds =
     new Set<string>();
 
-  /*
-   * V1010447_RESTORE_LOBBY_READY_SERVER_CONTRACT
-   * Lobby READY belongs to every live non-host player.
-   */
-  private readonly lobbyReadySessionIds =
-    new Set<string>();
-
   private lastPaintReadyPulseAt = 0;
 
   private readonly maxHunterReserve = 12;
@@ -594,8 +432,6 @@ export class MyRoom extends Room {
           this.state.phaseEndsAt,
         serverNow:
           Date.now(),
-        lobbyReadyState:
-          this.getLobbyReadyState(),
         paintReadyState:
           this.getPaintReadyState(),
         players:
@@ -647,38 +483,7 @@ export class MyRoom extends Room {
       y: number;
       foundOrder: number;
       foundAt: number;
-      /*
-       * V1010434_HUNTER_PERSONAL_FOUND_ATTRIBUTION: which Hunter actually found this Hider.
-       */
-      foundByHunterSessionId: string;
-      /*
-       * V1010438_STABLE_HUNTER_VICTORY_IDENTITY: stable tab/player identity. Session IDs can change on reconnect.
-       */
-      foundByHunterClientKey: string;
-      /*
-       * V1010436B_VICTORY_FOUND_PAINT_AUTHORITATIVE: exact camouflage snapshot captured at hit time.
-       */
-      paintStrokes: any[];
     }> = [];
-
-  /*
-   * V1010440_DIRECT_PERSONAL_FOUND_LEDGER
-   * Direct per-Hunter victory ledger.
-   * Key = stable clientKey when available, otherwise current sessionId.
-   * This is independent from team-wide victoryFoundHiders.
-   */
-  private readonly victoryFoundByHunterKey =
-    new Map<string, any[]>();
-
-  /*
-   * V1010446_FINISHED_SNAPSHOT_REUSES_FULL_ROUND_RESULT
-   * Full authoritative result retained through the finished phase so
-   * sendLobbySnapshot()/reconnect recovery cannot emit an old stripped result.
-   */
-  private lastRoundResultPayload:
-    any | null =
-    null;
-
 
   messages = {
     select_hunt_duration: (
@@ -1308,56 +1113,6 @@ export class MyRoom extends Room {
       );
     },
 
-    /*
-     * V1010447_RESTORE_LOBBY_READY_SERVER_CONTRACT
-     * Guests toggle READY; host never enters the READY set.
-     */
-    lobby_ready: (
-      client: Client,
-      message: {
-        ready?: boolean;
-      },
-    ): void => {
-      this.ensureValidHost();
-
-      if (
-        this.state.phase !== "lobby" ||
-        client.sessionId ===
-          this.state.hostId ||
-        !this.liveSessionIds.has(
-          client.sessionId,
-        ) ||
-        this.supersededSessionIds.has(
-          client.sessionId,
-        ) ||
-        !this.state.players.has(
-          client.sessionId,
-        )
-      ) {
-        return;
-      }
-
-      if (Boolean(message?.ready)) {
-        this.lobbyReadySessionIds.add(
-          client.sessionId,
-        );
-      } else {
-        this.lobbyReadySessionIds.delete(
-          client.sessionId,
-        );
-      }
-
-      this.broadcastLobbyReadyState();
-    },
-
-    request_lobby_ready_state: (
-      client: Client,
-    ): void => {
-      this.sendLobbyReadyState(
-        client,
-      );
-    },
-
     request_lobby_snapshot: (
       client: Client,
     ): void => {
@@ -1551,27 +1306,6 @@ export class MyRoom extends Room {
             message:
               "대기실 동기화 중입니다. 잠시 후 다시 시작해주세요.",
           },
-        );
-        return;
-      }
-
-      /*
-       * V1010447_RESTORE_LOBBY_READY_SERVER_CONTRACT / AUTHORITATIVE_START_BARRIER
-       * Every connected non-host player must be READY.
-       */
-      const lobbyReadyState =
-        this.getLobbyReadyState();
-
-      if (!lobbyReadyState.canStart) {
-        client.send(
-          "start_game_error",
-          {
-            message:
-              "모든 참가자가 준비완료한 뒤 시작할 수 있습니다.",
-          },
-        );
-        this.sendLobbyReadyState(
-          client,
         );
         return;
       }
@@ -2295,111 +2029,7 @@ if (
                 1,
               foundAt:
                 Date.now(),
-              foundByHunterSessionId:
-                client.sessionId,
-              foundByHunterClientKey:
-                this.clientKeyBySessionId.get(
-                  client.sessionId,
-                ) ?? "",
-              paintStrokes:
-                (
-                  this.roundPaintStrokes.get(
-                    hitId,
-                  ) ?? []
-                ).map(
-                  (stroke: any) => ({
-                    ...stroke,
-                    points:
-                      Array.isArray(
-                        stroke.points,
-                      )
-                        ? stroke.points.map(
-                            (point: any) => ({
-                              x:
-                                Number(point.x) || 0,
-                              y:
-                                Number(point.y) || 0,
-                            }),
-                          )
-                        : [],
-                  }),
-                ),
             });
-
-            /*
-             * V1010440_DIRECT_PERSONAL_FOUND_LEDGER / HIT_TIME_PERSONAL_ENTRY
-             * The shooter itself is the authority for personal ownership here.
-             */
-            const personalVictoryEntry =
-              this.victoryFoundHiders[
-                this.victoryFoundHiders.length -
-                  1
-              ];
-
-            const hunterStableKey =
-              this.clientKeyBySessionId.get(
-                client.sessionId,
-              ) ?? "";
-
-            const hunterLedgerKey =
-              hunterStableKey
-                ? "key:" +
-                  hunterStableKey
-                : "session:" +
-                  client.sessionId;
-
-            const personalLedger =
-              this.victoryFoundByHunterKey.get(
-                hunterLedgerKey,
-              ) ?? [];
-
-            if (
-              personalVictoryEntry &&
-              !personalLedger.some(
-                (entry: any) =>
-                  entry.sessionId ===
-                  hitId,
-              )
-            ) {
-              const directEntry = {
-                ...personalVictoryEntry,
-                paintStrokes:
-                  Array.isArray(
-                    personalVictoryEntry
-                      .paintStrokes,
-                  )
-                    ? personalVictoryEntry
-                        .paintStrokes
-                    : (
-                        this.roundPaintStrokes.get(
-                          hitId,
-                        ) ?? []
-                      ),
-              };
-
-              personalLedger.push(
-                directEntry,
-              );
-
-              this.victoryFoundByHunterKey.set(
-                hunterLedgerKey,
-                personalLedger,
-              );
-
-              /*
-               * Direct, recipient-only event.
-               * This completely avoids session/clientKey guessing in the card.
-               */
-              client.send(
-                "hunter_personal_found",
-                {
-                  entry:
-                    directEntry,
-                  count:
-                    personalLedger.length,
-                },
-              );
-            }
           }
 
           target.alive = false;
@@ -3602,23 +3232,22 @@ this.sendPaintReadyState(client);
                     return;
                   }
 
-                  /*
-               * V1010427B_TARGETED_RECONNECT_PAINT_SAFE / V86_RECONNECTING_CLIENT_ONLY
-               * Restore old v238.37 stability contract:
-               * full authoritative state goes only to the reconnecting client.
-               */
-              this.sendLobbySnapshot(
-                client,
-              );
+                  this.clients.forEach(
+                    (connectedClient) => {
+                      this.sendLobbySnapshot(
+                        connectedClient,
+                      );
 
-              client.send(
-                "round_paint_state",
-                {
-                  strokes:
-                    [...this.roundPaintStrokes.values()]
-                      .flat(),
-                },
-              );
+                      connectedClient.send(
+                        "round_paint_state",
+                        {
+                          strokes:
+                            [...this.roundPaintStrokes.values()]
+                              .flat(),
+                        },
+                      );
+                    },
+                  );
                 },
                 delay,
               );
@@ -3683,13 +3312,8 @@ this.sendPaintReadyState(client);
                   return;
                 }
 
-                /*
-                   * V1010427B_TARGETED_RECONNECT_PAINT_SAFE / V84_NO_ROOM_WIDE_FULL_PAINT
-                   * Keep syntax/timing intact, but target only this replacement
-                   * client rather than forcing every client to rebuild paint.
-                   */
-                  client.send(
-                    "round_paint_state",
+                this.broadcast(
+                  "round_paint_state",
                   {
                     strokes:
                       [...this.roundPaintStrokes.values()]
@@ -4716,9 +4340,20 @@ this.sendPaintReadyState(client);
        * Active rounds keep the long reservation because mobile OS suspension
        * is common and the existing round-outcome grace already handles absence.
        */
+      /*
+       * V1010450ZE_MINIMIZED_HOST_LISTING_GRACE
+       * Guests still disappear quickly from an idle Lobby, but the HOST gets
+       * a longer seat reservation so a minimized desktop browser does not make
+       * the public room vanish after only eight seconds.
+       */
       const reconnectSeconds =
         this.state.phase === "lobby"
-          ? 8
+          ? (
+              client.sessionId ===
+                this.state.hostId
+                ? 90
+                : 8
+            )
           : 300;
 
       await this.allowReconnection(
@@ -4989,125 +4624,20 @@ this.sendPaintReadyState(client);
             }),
           );
 
-      /*
-       * V1010446_FINISHED_SNAPSHOT_REUSES_FULL_ROUND_RESULT / NO_STRIPPED_FINISHED_RESULT
-       *
-       * Old code resent only winner/revealedHiders/durationMs here.
-       * That packet erased victoryShowcase on clients and produced 0 FOUND.
-       * Re-send the same rich result shape used by finishGame(), personalized
-       * for this exact client.
-       */
-      const savedPayload =
-        this.lastRoundResultPayload;
-
-      if (savedPayload) {
-        const teamFound =
-          Array.isArray(
-            savedPayload?.victoryShowcase
-              ?.foundHiders,
-          )
-            ? savedPayload.victoryShowcase
-                .foundHiders
-            : [];
-
-        const recipientSessionId =
-          client.sessionId;
-
-        const recipientClientKey =
-          this.clientKeyBySessionId.get(
-            recipientSessionId,
-          ) ?? "";
-
-        const recipientLedgerKey =
-          recipientClientKey
-            ? "key:" +
-              recipientClientKey
-            : "session:" +
-              recipientSessionId;
-
-        const directPersonalFound =
-          this.victoryFoundByHunterKey.get(
-            recipientLedgerKey,
-          ) ??
-          this.victoryFoundByHunterKey.get(
-            "session:" +
-              recipientSessionId,
-          ) ??
-          [];
-
-        const personalFoundHiders =
-          directPersonalFound.length > 0
-            ? directPersonalFound
-            : teamFound.filter(
-                (entry: any) => {
-                  const finderClientKey =
-                    String(
-                      entry
-                        ?.foundByHunterClientKey ??
-                        "",
-                    );
-
-                  if (
-                    recipientClientKey &&
-                    finderClientKey
-                  ) {
-                    return (
-                      finderClientKey ===
-                      recipientClientKey
-                    );
-                  }
-
-                  return (
-                    String(
-                      entry
-                        ?.foundByHunterSessionId ??
-                        "",
-                    ) ===
-                    recipientSessionId
-                  );
-                },
-              );
-
-        const recipientPlayer =
-          this.state.players.get(
-            recipientSessionId,
-          );
-
-        client.send(
-          "round_result",
-          {
-            ...savedPayload,
-            durationMs:
-              Math.max(
-                0,
-                this.state.phaseEndsAt -
-                  Date.now(),
-              ),
-            revealedHiders:
-              Array.isArray(
-                savedPayload
-                  ?.revealedHiders,
-              )
-                ? savedPayload.revealedHiders
-                : revealedHiders,
-            victoryShowcase: {
-              ...(
-                savedPayload
-                  ?.victoryShowcase ??
-                {}
-              ),
-              personalFoundHiders,
-              recipientName:
-                String(
-                  recipientPlayer?.name ??
-                    "Player",
-                ).slice(0, 32),
-              recipientSessionId,
-              recipientClientKey,
-            },
-          },
-        );
-      }
+      client.send(
+        "round_result",
+        {
+          winner:
+            this.state.winner,
+          revealedHiders,
+          durationMs:
+            Math.max(
+              0,
+              this.state.phaseEndsAt -
+                Date.now(),
+            ),
+        },
+      );
     }
 
     /* V101077_RECONNECT_MULTI_PULSE */
@@ -5157,9 +4687,6 @@ this.sendPaintReadyState(client);
     _code: CloseCode,
   ): void {
     this.liveSessionIds.delete(
-      client.sessionId,
-    );
-    this.lobbyReadySessionIds.delete(
       client.sessionId,
     );
     this.markConnectionTopologyChanged();
@@ -5778,8 +5305,6 @@ this.sendPaintReadyState(client);
       this.victoryFoundHiders.length,
     );
 
-    this.victoryFoundByHunterKey.clear();
-
     this.paintReadySessionIds.clear();
 
     this.updateRoomMetadata();
@@ -6006,75 +5531,12 @@ this.sendPaintReadyState(client);
       this.state.winner =
         "hunters";
 
-      /*
-       * V1010436B_VICTORY_FOUND_PAINT_AUTHORITATIVE / COMPLETE_STALE_WINNER_CORRECTION
-       * A winner-only correction creates a 0 FOUND victory card.
-       * Send the complete authoritative result instead.
-       */
-      const correctionRevealedHiders =
-        [...this.state.players.entries()]
-          .filter(
-            ([, player]) =>
-              player.role === "hider",
-          )
-          .map(
-            ([sessionId, player]) => ({
-              sessionId,
-              x:
-                player.x,
-              y:
-                player.y,
-            }),
-          );
-
-      const correctionVictoryShowcase = {
-        activeMap:
-          this.state.activeMap,
-        foundHiders:
-          this.victoryFoundHiders.map(
-            (entry) => ({
-              sessionId:
-                entry.sessionId,
-              name:
-                entry.name,
-              x:
-                entry.x,
-              y:
-                entry.y,
-              foundOrder:
-                entry.foundOrder,
-              foundAt:
-                entry.foundAt,
-              foundByHunterSessionId:
-                entry.foundByHunterSessionId,
-              foundByHunterClientKey:
-                entry.foundByHunterClientKey,
-              paintStrokes:
-                entry.paintStrokes,
-            }),
-          ),
-        survivingHiders:
-          [] as Array<{
-            sessionId: string;
-            name?: string;
-            x: number;
-            y: number;
-          }>,
-      };
-
-      this.sendRoundResultPersonalized(
+      this.broadcast(
+        "round_result",
         {
           winner:
             "hunters",
-          reason:
-            "all_hiders_found",
-          revealedHiders:
-            correctionRevealedHiders,
-          durationMs:
-            this.resultDurationMs,
-          victoryShowcase:
-            correctionVictoryShowcase,
-        }
+        },
       );
 
       return;
@@ -6140,12 +5602,6 @@ this.sendPaintReadyState(client);
               entry.foundOrder,
             foundAt:
               entry.foundAt,
-            foundByHunterSessionId:
-              entry.foundByHunterSessionId,
-            foundByHunterClientKey:
-              entry.foundByHunterClientKey,
-            paintStrokes:
-              entry.paintStrokes,
           }),
         ),
       survivingHiders:
@@ -6171,8 +5627,9 @@ this.sendPaintReadyState(client);
           ),
     };
 
-    this.sendRoundResultPersonalized(
-        {
+    this.broadcast(
+      "round_result",
+      {
         winner,
         reason,
         revealedHiders,
@@ -6182,8 +5639,8 @@ this.sendPaintReadyState(client);
          * V1010388_SERVER_VICTORY_SHOWCASE: compact metadata only; paint pixels stay client-side.
          */
         victoryShowcase,
-      }
-      );
+      },
+    );
 
     this.updateRoomMetadata();
     this.broadcastPhaseChanged();
@@ -6218,8 +5675,6 @@ this.sendPaintReadyState(client);
     this.poopLaughTriggeredHunters.clear();
     this.state.phase = "lobby";
     this.state.phaseEndsAt = 0;
-    this.lastRoundResultPayload =
-      null;
 
     this.hunterDisconnectOutcomeGeneration += 1;
     this.allHiderDisconnectOutcomeGeneration += 1;
@@ -6314,7 +5769,6 @@ this.sendPaintReadyState(client);
     this.lobbyStartAllowedAt = Date.now() + 1_000;
     /* V101069_READY_RESET */
     this.paintReadySessionIds.clear();
-    this.lobbyReadySessionIds.clear();
 
     /*
      * 선택값은 다음 라운드에도 유지하되,
@@ -6335,8 +5789,6 @@ this.sendPaintReadyState(client);
       0,
       this.victoryFoundHiders.length,
     );
-
-    this.victoryFoundByHunterKey.clear();
 
     for (
       const [
@@ -6379,135 +5831,6 @@ this.sendPaintReadyState(client);
      * now dispose the resulting empty lobby as well.
      */
     this.disposeEmptyLobbySoon();
-  }
-
-  /*
-   * V1010447_RESTORE_LOBBY_READY_SERVER_CONTRACT
-   * READY total = current live players except the host.
-   * Reconnect-reserved/ghost/superseded sessions never block a fresh lobby.
-   */
-  private getLobbyReadyState(): {
-    readySessionIds: string[];
-    readyCount: number;
-    totalCount: number;
-    allReady: boolean;
-    canStart: boolean;
-    livePlayerCount: number;
-    hasDisconnectedPlayers: boolean;
-  } {
-    this.ensureValidHost();
-
-    const livePlayerIds =
-      [...this.liveSessionIds]
-        .filter(
-          (sessionId) =>
-            this.state.players.has(
-              sessionId,
-            ) &&
-            !this.supersededSessionIds.has(
-              sessionId,
-            ),
-        );
-
-    const livePlayerSet =
-      new Set(livePlayerIds);
-
-    const eligibleReadyIds =
-      livePlayerIds.filter(
-        (sessionId) =>
-          sessionId !==
-            this.state.hostId,
-      );
-
-    const eligibleReadySet =
-      new Set(eligibleReadyIds);
-
-    /*
-     * Remove stale READY ownership whenever a player leaves, reconnects with
-     * another sessionId, or becomes host.
-     */
-    for (
-      const sessionId of
-      [...this.lobbyReadySessionIds]
-    ) {
-      if (
-        !eligibleReadySet.has(
-          sessionId,
-        )
-      ) {
-        this.lobbyReadySessionIds.delete(
-          sessionId,
-        );
-      }
-    }
-
-    const readySessionIds =
-      eligibleReadyIds.filter(
-        (sessionId) =>
-          this.lobbyReadySessionIds.has(
-            sessionId,
-          ),
-      );
-
-    const totalCount =
-      eligibleReadyIds.length;
-
-    const readyCount =
-      readySessionIds.length;
-
-    const livePlayerCount =
-      livePlayerIds.length;
-
-    /*
-     * A state.players actor without a live transport is a reconnect reservation,
-     * not a participant for the next lobby round.
-     */
-    const hasDisconnectedPlayers =
-      [...this.state.players.keys()]
-        .some(
-          (sessionId) =>
-            !livePlayerSet.has(
-              sessionId,
-            ) &&
-            !this.supersededSessionIds.has(
-              sessionId,
-            ),
-        );
-
-    const allReady =
-      totalCount > 0 &&
-      readyCount ===
-        totalCount;
-
-    return {
-      readySessionIds,
-      readyCount,
-      totalCount,
-      allReady,
-      canStart:
-        this.state.phase === "lobby" &&
-        livePlayerCount >= 2 &&
-        allReady,
-      livePlayerCount,
-      hasDisconnectedPlayers,
-    };
-  }
-
-  private sendLobbyReadyState(
-    client: Client,
-  ): void {
-    client.send(
-      "lobby_ready_state",
-      this.getLobbyReadyState(),
-    );
-  }
-
-  private broadcastLobbyReadyState():
-    void {
-    this.broadcast(
-      "lobby_ready_state",
-      this.getLobbyReadyState(),
-    );
   }
 
   private getPaintReadyState(): {

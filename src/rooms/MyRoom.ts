@@ -1,3 +1,4 @@
+/* V1010451D_LOBBY_READY_ROSTER_BROADCAST: broadcast authoritative READY roster on join/leave/reconnect. */
 /* V1010451C_RESTORE_READY_CONTRACT_FIXED: fixed restoration of authoritative Lobby READY contract. */
 /* V1010450ZF2_RECONNECT_LOOP_HOTFIX:
  * restore live-socket public listing + 8s Lobby reconnect window.
@@ -3793,6 +3794,14 @@ this.sendPaintReadyState(client);
 
     this.updateRoomMetadata();
 
+    /*
+     * V1010451D_LOBBY_READY_ROSTER_BROADCAST / JOIN
+     * A new Lobby seat changes READY denominator for every browser.
+     */
+    if (this.state.phase === "lobby") {
+      this.broadcastLobbyReadyState();
+    }
+
     /* V101079_REJOIN_SNAPSHOT_PULSE */
     if (
       this.state.phase !== "lobby"
@@ -4557,6 +4566,14 @@ this.sendPaintReadyState(client);
     this.updateRoomMetadata();
     this.syncRoomListingVisibility();
 
+    /*
+     * V1010451D_LOBBY_READY_ROSTER_BROADCAST / RECONNECT
+     * Recovered Lobby transport rejoins the READY denominator immediately.
+     */
+    if (this.state.phase === "lobby") {
+      this.broadcastLobbyReadyState();
+    }
+
     /* V101078_CANCEL_NO_HUNTER_ON_RECONNECT */
     this.noHunterGraceGeneration += 1;
 
@@ -4731,11 +4748,18 @@ this.sendPaintReadyState(client);
     this.syncRoomListingVisibility();
 
     /* V101073_DUPLICATE_LEAVE_GUARD */
+    /*
+     * V1010451D_LOBBY_READY_ROSTER_BROADCAST / DUPLICATE_LEAVE
+     * Duplicate/stale leave can still change transport membership.
+     */
     if (
       !this.state.players.has(
         client.sessionId,
       )
     ) {
+      if (this.state.phase === "lobby") {
+        this.broadcastLobbyReadyState();
+      }
       return;
     }
 
@@ -4803,6 +4827,7 @@ this.sendPaintReadyState(client);
 
     /* V101069_READY_LEAVE_CLEANUP */
     this.paintReadySessionIds.delete(client.sessionId);
+    this.lobbyReadySessionIds.delete(client.sessionId);
     if (this.state.phase === "paint") {
       this.broadcastPaintReadyState();
     }
@@ -4836,6 +4861,14 @@ this.sendPaintReadyState(client);
           );
         },
       );
+    }
+
+    /*
+     * V1010451D_LOBBY_READY_ROSTER_BROADCAST / LEAVE
+     * Host and guests now receive the same authoritative READY denominator.
+     */
+    if (this.state.phase === "lobby") {
+      this.broadcastLobbyReadyState();
     }
 
     this.broadcast(
@@ -5894,6 +5927,7 @@ this.sendPaintReadyState(client);
         .filter(
           (sessionId) =>
             this.state.players.has(sessionId) &&
+            this.liveSessionIds.has(sessionId) &&
             !this.supersededSessionIds.has(sessionId),
         );
 

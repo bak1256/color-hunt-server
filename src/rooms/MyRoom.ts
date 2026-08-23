@@ -1,3 +1,4 @@
+/* V1010451C_RESTORE_READY_CONTRACT_FIXED: fixed restoration of authoritative Lobby READY contract. */
 /* V1010450ZF2_RECONNECT_LOOP_HOTFIX:
  * restore live-socket public listing + 8s Lobby reconnect window.
  */
@@ -333,6 +334,9 @@ export class MyRoom extends Room {
   private readonly hunterRoundStats =
     new Map<string, HunterRoundStats>();
 
+  private readonly lobbyReadySessionIds =
+    new Set<string>();
+
   private readonly paintReadySessionIds =
     new Set<string>();
 
@@ -415,6 +419,8 @@ export class MyRoom extends Room {
           this.state.phaseEndsAt,
         serverNow:
           Date.now(),
+        lobbyReadyState:
+          this.getLobbyReadyState(),
         paintReadyState:
           this.getPaintReadyState(),
         players:
@@ -1096,6 +1102,46 @@ export class MyRoom extends Room {
       );
     },
 
+    lobby_ready: (
+      client: Client,
+      payload: {
+        ready?: boolean;
+      },
+    ): void => {
+      this.ensureValidHost();
+
+      if (
+        this.state.phase !== "lobby" ||
+        client.sessionId === this.state.hostId ||
+        !this.state.players.has(client.sessionId) ||
+        this.supersededSessionIds.has(client.sessionId) ||
+        !this.clients.some(
+          (connectedClient) =>
+            connectedClient.sessionId === client.sessionId,
+        )
+      ) {
+        return;
+      }
+
+      if (Boolean(payload?.ready)) {
+        this.lobbyReadySessionIds.add(
+          client.sessionId,
+        );
+      } else {
+        this.lobbyReadySessionIds.delete(
+          client.sessionId,
+        );
+      }
+
+      this.broadcastLobbyReadyState();
+    },
+
+    request_lobby_ready_state: (
+      client: Client,
+    ): void => {
+      this.sendLobbyReadyState(client);
+    },
+
     request_lobby_snapshot: (
       client: Client,
     ): void => {
@@ -1319,6 +1365,21 @@ export class MyRoom extends Room {
           },
         );
 
+        return;
+      }
+
+      const lobbyReadyState =
+        this.getLobbyReadyState();
+
+      if (!lobbyReadyState.canStart) {
+        client.send(
+          "start_game_error",
+          {
+            message:
+              "아직 준비하지 않은 플레이어가 있습니다.",
+          },
+        );
+        this.sendLobbyReadyState(client);
         return;
       }
 
@@ -3130,6 +3191,9 @@ this.sendPaintReadyState(client);
             );
 
           this.paintReadySessionIds.delete(
+            existingSessionId,
+          );
+          this.lobbyReadySessionIds.delete(
             existingSessionId,
           );
 
@@ -5785,10 +5849,14 @@ this.sendPaintReadyState(client);
       );
     }
 
+    this.lobbyReadySessionIds.clear();
+
     this.broadcast(
       "reset_round",
       {},
     );
+
+    this.broadcastLobbyReadyState();
 
     this.updateRoomMetadata();
     this.broadcastPhaseChanged();
@@ -5800,6 +5868,116 @@ this.sendPaintReadyState(client);
      * now dispose the resulting empty lobby as well.
      */
     this.disposeEmptyLobbySoon();
+  }
+
+  private getLobbyReadyState(): {
+    readySessionIds: string[];
+    readyCount: number;
+    totalCount: number;
+    allReady: boolean;
+    canStart: boolean;
+    livePlayerCount: number;
+    hasDisconnectedPlayers: boolean;
+  } {
+    this.ensureValidHost();
+
+    /*
+     * V1010451C_RESTORE_READY_CONTRACT_FIXED / CLIENTS_ARE_TRANSPORT_TRUTH
+     * READY eligibility uses Colyseus' actual connected transports.
+     */
+    const connectedSessionIds =
+      this.clients
+        .map(
+          (connectedClient) =>
+            connectedClient.sessionId,
+        )
+        .filter(
+          (sessionId) =>
+            this.state.players.has(sessionId) &&
+            !this.supersededSessionIds.has(sessionId),
+        );
+
+    const connectedSet =
+      new Set(connectedSessionIds);
+
+    for (const sessionId of connectedSet) {
+      this.liveSessionIds.add(sessionId);
+    }
+
+    const eligibleReadyIds =
+      connectedSessionIds.filter(
+        (sessionId) =>
+          sessionId !== this.state.hostId,
+      );
+
+    const eligibleSet =
+      new Set(eligibleReadyIds);
+
+    for (const sessionId of [...this.lobbyReadySessionIds]) {
+      if (!eligibleSet.has(sessionId)) {
+        this.lobbyReadySessionIds.delete(
+          sessionId,
+        );
+      }
+    }
+
+    const readySessionIds =
+      eligibleReadyIds.filter(
+        (sessionId) =>
+          this.lobbyReadySessionIds.has(
+            sessionId,
+          ),
+      );
+
+    const readyCount =
+      readySessionIds.length;
+
+    const totalCount =
+      eligibleReadyIds.length;
+
+    const livePlayerCount =
+      connectedSessionIds.length;
+
+    const hasDisconnectedPlayers =
+      [...this.state.players.keys()]
+        .some(
+          (sessionId) =>
+            !connectedSet.has(sessionId) &&
+            !this.supersededSessionIds.has(sessionId),
+        );
+
+    const allReady =
+      totalCount > 0 &&
+      readyCount === totalCount;
+
+    return {
+      readySessionIds,
+      readyCount,
+      totalCount,
+      allReady,
+      canStart:
+        livePlayerCount >= 2 &&
+        allReady &&
+        !hasDisconnectedPlayers,
+      livePlayerCount,
+      hasDisconnectedPlayers,
+    };
+  }
+
+  private sendLobbyReadyState(
+    client: Client,
+  ): void {
+    client.send(
+      "lobby_ready_state",
+      this.getLobbyReadyState(),
+    );
+  }
+
+  private broadcastLobbyReadyState(): void {
+    this.broadcast(
+      "lobby_ready_state",
+      this.getLobbyReadyState(),
+    );
   }
 
   private getPaintReadyState(): {

@@ -141,6 +141,15 @@ export class MyRoom extends Room {
     new Set<string>();
 
   /*
+   * V1010452S3_STALE_EMPTY_LOBBY_LOCK
+   *
+   * True only while a Lobby has zero REAL transports but is still alive for
+   * the proven 8-second same-session reconnect reservation.
+   * Fresh onJoin must never revive this stale shell.
+   */
+  private staleEmptyLobbyLocked = false;
+
+  /*
    * V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT
    *
    * The recorded failure showed server phase/timer continuing into Hunt while
@@ -3033,6 +3042,52 @@ this.sendPaintReadyState(client);
     this.markConnectionTopologyChanged();
 
     /*
+     * V1010452S3_STALE_EMPTY_LOBBY_LOCK / FRESH_JOIN_GUARD
+     *
+     * The room list may lag behind setPrivate(true). If this room lost its
+     * final real Lobby socket, only Colyseus onReconnect() for the preserved
+     * session may revive it. A normal room-card click is a fresh onJoin and
+     * must be rejected before it can create a ghost actor or inherit host.
+     */
+    if (
+      this.state.phase === "lobby" &&
+      this.staleEmptyLobbyLocked
+    ) {
+      this.liveSessionIds.delete(
+        client.sessionId,
+      );
+      this.markConnectionTopologyChanged();
+
+      this.updateRoomMetadata();
+      this.syncRoomListingVisibility();
+      this.setPrivate(true);
+
+      client.send(
+        "join_rejected",
+        {
+          reason: "room_closed",
+          returnToLobby: true,
+        },
+      );
+
+      this.clock.setTimeout(
+        () => {
+          try {
+            client.leave(
+              4004,
+              "room_closed",
+            );
+          } catch {
+            // Transport may already be gone.
+          }
+        },
+        0,
+      );
+
+      return;
+    }
+
+    /*
      * V1010387_SERVER_FULL_ROOM_HARD_GUARD
      *
      * Colyseus maxClients=10 is already the primary capacity guard.
@@ -4439,6 +4494,21 @@ this.sendPaintReadyState(client);
     this.syncRoomListingVisibility();
 
     /*
+     * V1010452S3_STALE_EMPTY_LOBBY_LOCK / DROP
+     *
+     * Hide already happens above via liveSessionIds.size === 0.
+     * Additionally freeze this zero-live Lobby against NEW joins while the
+     * existing 8-second same-session reconnect reservation is pending.
+     */
+    if (
+      this.state.phase === "lobby" &&
+      this.liveSessionIds.size === 0
+    ) {
+      this.staleEmptyLobbyLocked = true;
+      this.setPrivate(true);
+    }
+
+    /*
      * Colyseus 0.17 distinguishes a temporary network drop from a real
      * leave when onDrop() is implemented.
      *
@@ -4688,6 +4758,18 @@ this.sendPaintReadyState(client);
             this.state.players.size,
         },
       );
+    }
+
+    /*
+     * V1010452S3_STALE_EMPTY_LOBBY_LOCK / RECONNECT
+     *
+     * We reached here only after superseded/stale reconnect rejection above.
+     * Therefore this is a legitimate preserved-session recovery.
+     */
+    if (
+      this.state.phase === "lobby"
+    ) {
+      this.staleEmptyLobbyLocked = false;
     }
 
     this.liveSessionIds.add(
@@ -6455,6 +6537,22 @@ this.sendPaintReadyState(client);
 
   private ensureValidHost(): void {
     /*
+     * V1010452S3_STALE_EMPTY_LOBBY_LOCK / HOST
+     *
+     * A locked zero-live Lobby has no active host. state.players can still
+     * contain the reconnect-reserved old actor, but it has no authority until
+     * its real transport reconnects.
+     */
+    if (
+      this.state.phase === "lobby" &&
+      this.staleEmptyLobbyLocked &&
+      this.liveSessionIds.size === 0
+    ) {
+      this.state.hostId = "";
+      return;
+    }
+
+    /*
      * v0.10.10.230 GHOST HOST FIX:
      * During an active round a temporarily dropped host may remain in
      * state.players for reconnection. Once we are in the lobby, however,
@@ -6513,6 +6611,7 @@ this.sendPaintReadyState(client);
   }
   onDispose(): void {
     this.intentionalLeaveSessionIds.clear();
+    this.staleEmptyLobbyLocked = false;
 
     this.liveSessionIds.clear();
     this.supersededSessionIds.clear();

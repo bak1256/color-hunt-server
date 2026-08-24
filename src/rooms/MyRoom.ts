@@ -1013,10 +1013,10 @@ export class MyRoom extends Room {
           );
 
       /*
-       * Spam protection:
-       * - no faster than ~0.8 seconds
-       * - max 6 messages / 10 seconds
-       * - exact same normalized message cannot repeat within 8 seconds
+       * Spam protection (V1010451M7_SERVER_CHAT_SPAM_RELAX):
+       * - accidental same-message duplicate within 650ms is silently ignored
+       * - other messages faster than 300ms are blocked
+       * - max 8 accepted messages / 10 seconds
        */
       const latest =
         timestamps[
@@ -1036,19 +1036,31 @@ export class MyRoom extends Room {
           client.sessionId,
         );
 
+      /*
+       * V1010451M7_SERVER_CHAT_SPAM_RELAX
+       *
+       * Accidental duplicate submit (Enter/click firing twice) is ignored
+       * silently instead of showing a false "spam" warning.
+       */
+      if (
+        previous &&
+        previous.text ===
+          comparable &&
+        now -
+          previous.sentAt <
+          650
+      ) {
+        return;
+      }
+
+      /*
+       * Real flood protection remains, but normal conversation is less strict.
+       */
       if (
         now - latest <
-          800 ||
+          300 ||
         timestamps.length >=
-          6 ||
-        (
-          previous &&
-          previous.text ===
-            comparable &&
-          now -
-            previous.sentAt <
-            8_000
-        )
+          8
       ) {
         client.send(
           "chat_error",

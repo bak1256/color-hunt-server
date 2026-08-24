@@ -125,6 +125,13 @@ export class MyRoom extends Room {
     new Set<string>();
 
   /*
+   * V1010451M5S_SERVER_INTENTIONAL_LOBBY_LEAVE_GHOST_FIX_ROOT_ROBUST
+   * Explicit Lobby exits bypass temporary reconnect reservation.
+   */
+  private readonly intentionalLeaveSessionIds =
+    new Set<string>();
+
+  /*
    * V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT
    *
    * The recorded failure showed server phase/timer continuing into Hunt while
@@ -477,6 +484,27 @@ export class MyRoom extends Room {
     }> = [];
 
   messages = {
+    /*
+     * V1010451M5S_SERVER_INTENTIONAL_LOBBY_LEAVE_GHOST_FIX_ROOT_ROBUST / LEAVE_INTENT
+     */
+    leave_room_intent: (
+      client: Client,
+    ): void => {
+      if (
+        this.state.phase !== "lobby" ||
+        !this.state.players.has(
+          client.sessionId,
+        )
+      ) {
+        return;
+      }
+
+      this.intentionalLeaveSessionIds.add(
+        client.sessionId,
+      );
+    },
+
+
     select_hunt_duration: (
       client: Client,
       message: {
@@ -4310,6 +4338,25 @@ this.sendPaintReadyState(client);
     client: Client,
     code: number,
   ): Promise<void> {
+    /*
+     * V1010451M5S_SERVER_INTENTIONAL_LOBBY_LEAVE_GHOST_FIX_ROOT_ROBUST / DROP_FAST_PATH
+     *
+     * "Leave room" is a permanent Lobby exit, not a recoverable socket drop.
+     * Reuse the existing authoritative onLeave cleanup immediately.
+     */
+    if (
+      this.intentionalLeaveSessionIds.delete(
+        client.sessionId,
+      )
+    ) {
+      this.onLeave(
+        client,
+        code as CloseCode,
+      );
+      return;
+    }
+
+
     this.liveSessionIds.delete(
       client.sessionId,
     );
@@ -4752,6 +4799,11 @@ this.sendPaintReadyState(client);
     client: Client,
     _code: CloseCode,
   ): void {
+    this.intentionalLeaveSessionIds.delete(
+      client.sessionId,
+    );
+
+
     this.liveSessionIds.delete(
       client.sessionId,
     );
@@ -6387,6 +6439,8 @@ this.sendPaintReadyState(client);
     this.ensureValidHost();
   }
   onDispose(): void {
+    this.intentionalLeaveSessionIds.clear();
+
     this.liveSessionIds.clear();
     this.supersededSessionIds.clear();
 

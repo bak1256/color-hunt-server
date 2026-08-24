@@ -3022,6 +3022,28 @@ this.sendPaintReadyState(client);
     _client: Client,
     options: JoinOptions,
   ): boolean {
+    /*
+     * V1010452S4_STALE_ROOM_PREAUTH_GHOST_BLOCK
+     *
+     * When the last REAL Lobby transport drops, 452s3 keeps the old PlayerState
+     * for the proven 8-second same-session reconnect window. A stale room-list
+     * card can still be clicked during listing-cache convergence.
+     *
+     * Reject that NEW join before onJoin/state synchronization. This prevents:
+     * - the old ghost actor flashing for a moment
+     * - a fresh session inheriting host after clicking the stale room card
+     *
+     * Legitimate same-session recovery is handled by allowReconnection() ->
+     * onReconnect(), so it does not need to pass this fresh-join auth gate.
+     */
+    if (
+      this.state.phase === "lobby" &&
+      this.staleEmptyLobbyLocked &&
+      this.liveSessionIds.size === 0
+    ) {
+      return false;
+    }
+
     if (!this.state.isPrivate) {
       return true;
     }
@@ -3053,6 +3075,8 @@ this.sendPaintReadyState(client);
       this.state.phase === "lobby" &&
       this.staleEmptyLobbyLocked
     ) {
+      this.state.hostId = "";
+
       this.liveSessionIds.delete(
         client.sessionId,
       );
@@ -4505,7 +4529,16 @@ this.sendPaintReadyState(client);
       this.liveSessionIds.size === 0
     ) {
       this.staleEmptyLobbyLocked = true;
+      this.state.hostId = "";
       this.setPrivate(true);
+
+      /*
+       * Publish the zero-live/no-host state immediately. The room-list service
+       * may still show a cached card briefly, but that card can no longer enter
+       * the room and no disconnected actor owns host authority.
+       */
+      this.updateRoomMetadata();
+      this.syncRoomListingVisibility();
     }
 
     /*

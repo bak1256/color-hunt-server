@@ -1,3 +1,4 @@
+/* V1010452_SKILL_SYSTEM_FOUNDATION: role-neutral skill selection foundation; first Hider skills paintball/laser. */
 /* V1010451G_FULL_ASSIST_VICTORY_HISTORY: retain complete Paint Help history for authoritative Hunter victory snapshots. */
 /* V1010451D_LOBBY_READY_ROSTER_BROADCAST: broadcast authoritative READY roster on join/leave/reconnect. */
 /* V1010451C_RESTORE_READY_CONTRACT_FIXED: fixed restoration of authoritative Lobby READY contract. */
@@ -52,6 +53,14 @@ type HunterAimMessage = {
 
 type FartUseMessage = {
   pressedAt?: number;
+};
+
+type PlayerSkillId =
+  | "paintball"
+  | "laser";
+
+type SkillSelectMessage = {
+  skillId?: PlayerSkillId;
 };
 
 type BrushShape =
@@ -348,6 +357,14 @@ export class MyRoom extends Room {
 
   private readonly paintReadySessionIds =
     new Set<string>();
+
+  /*
+   * V1010452_SKILL_SYSTEM_FOUNDATION
+   * Skill ownership follows stable clientKey so reconnect/session handoff
+   * keeps the same selection. Only the owner receives its selection packet.
+   */
+  private readonly selectedSkillByClientKey =
+    new Map<string, PlayerSkillId>();
 
   private lastPaintReadyPulseAt = 0;
 
@@ -2354,6 +2371,50 @@ if (
         Date.now();
 
       this.startHuntPhase();
+    },
+
+    skill_select: (
+      client: Client,
+      message: SkillSelectMessage,
+    ): void => {
+      if (this.state.phase !== "paint") return;
+
+      const player = this.state.players.get(client.sessionId);
+      if (!player || !player.alive) return;
+
+      const skillId = message?.skillId;
+      if (skillId !== "paintball" && skillId !== "laser") return;
+
+      /*
+       * First test rollout: Hider can select these two skills.
+       * The storage/API is role-neutral so Hunter skills can reuse it later.
+       */
+      if (player.role !== "hider") return;
+
+      const clientKey =
+        this.clientKeyBySessionId.get(client.sessionId) ??
+        client.sessionId;
+
+      this.selectedSkillByClientKey.set(clientKey, skillId);
+
+      client.send("skill_state", { skillId });
+    },
+
+    request_skill_state: (
+      client: Client,
+    ): void => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+
+      const clientKey =
+        this.clientKeyBySessionId.get(client.sessionId) ??
+        client.sessionId;
+
+      client.send("skill_state", {
+        skillId:
+          this.selectedSkillByClientKey.get(clientKey) ??
+          "paintball",
+      });
     },
 
     request_paint_ready_state: (

@@ -2113,18 +2113,11 @@ if (
           client.sessionId,
         );
 
-      if (
-        hunterStats.reserve <= 0
-      ) {
-        this.sendWeaponState(
-          client,
-          heatState,
-          hunterStats,
-        );
-        return;
-      }
-
-      if (
+      /*
+       * V1010464_SERVER_UNLIMITED_SHOTGUN_AMMO
+       * Shotgun reserve is temporarily unlimited. HEAT alone gates fire rate.
+       */
+if (
         now <
         heatState.overheatedUntil
       ) {
@@ -2136,8 +2129,8 @@ if (
         return;
       }
 
-      hunterStats.reserve -= 1;
-      hunterStats.shotsFired += 1;
+      /* V1010464_SERVER_UNLIMITED_SHOTGUN_AMMO: reserve intentionally stays constant. */
+hunterStats.shotsFired += 1;
 
       heatState.heat = Math.min(
         100,
@@ -2317,12 +2310,7 @@ if (
        */
       const precisionReward =
         hitIds.size > 0
-          ? hitIds.size *
-            (
-              100 +
-              hunterStats.reserve *
-                25
-            )
+          ? hitIds.size * 100
           : 0;
 
       hunterStats.precisionPoints +=
@@ -2367,48 +2355,13 @@ if (
       }
 
       /*
-       * 살아 있는 Hider가 남아 있고,
-       * 모든 살아 있는 Hunter의 reserve 합계가 0이면 즉시 Hunter 패배.
-       * 마지막 발의 pellet 판정을 모두 끝낸 뒤 실행하므로
-       * 마지막 탄 역전승도 정상 처리됩니다.
+       * V1010464_SERVER_UNLIMITED_SHOTGUN_AMMO
+       * No ammo-depletion defeat. Hunt now ends only by:
+       * - all Hiders found -> Hunters
+       * - Hunt timer expiry -> Hiders
+       * Shotgun spam remains limited by HEAT/overheat.
        */
-      if (
-        aliveHidersAfterShot > 0 &&
-        this.allHuntersOutOfAmmo()
-      ) {
-        /* v0.10.10.71: ammo depletion no longer ends Hunt early. */
-        this.broadcast(
-          "hunters_out_of_ammo",
-          {
-            message:
-              "헌터의 탄약이 모두 소진되었습니다!",
-          },
-        );
-      
-        /*
-         * V1010182_MULTIPLAYER_AMMO_DEPLETION_FINISH
-         *
-         * Multiplayer rule: if at least one Hider survives after the shot and
-         * every living Hunter has 0 reserve, the round is over immediately.
-         * finishGame() owns phase=finished, round_result, phase_changed and
-         * the normal timed resetToLobby() path.
-         */
-        this.finishGame(
-          "hiders",
-          "ammo_depleted",
-        );
-        return;
-}
-    },
-
-    return_to_lobby: (
-      _client: Client,
-    ): void => {
-      if (this.state.phase !== "finished") {
-        return;
-      }
-
-      this.resetToLobby();
+this.resetToLobby();
     },
 
     /* V101069F_READY_HANDLER */
@@ -6603,47 +6556,6 @@ this.sendPaintReadyState(client);
     }
 
     return current;
-  }
-
-  private getTotalHunterReserve(): number {
-    let totalReserve = 0;
-
-    for (
-      const [
-        sessionId,
-        player,
-      ] of this.state.players
-    ) {
-      if (
-        player.role !== "hunter" ||
-        !player.alive
-      ) {
-        continue;
-      }
-
-      totalReserve +=
-        this.getHunterRoundStats(
-          sessionId,
-        ).reserve;
-    }
-
-    return totalReserve;
-  }
-
-  private allHuntersOutOfAmmo(): boolean {
-    const hunters =
-      [
-        ...this.state.players.values(),
-      ].filter(
-        (player) =>
-          player.role === "hunter" &&
-          player.alive,
-      );
-
-    return (
-      hunters.length > 0 &&
-      this.getTotalHunterReserve() <= 0
-    );
   }
 
   private getAliveHiderCount(): number {

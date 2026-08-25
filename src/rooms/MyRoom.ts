@@ -366,7 +366,8 @@ export class MyRoom extends Room {
   private readonly lastSniperFireAt = new Map<string, number>();
   private readonly sniperAvailableRemainingMs = 30_000;
   private readonly sniperWarningRemainingMs = 35_000;
-  private readonly sniperReloadMs = 3_000;
+  /* V1010453E_SNIPER_2S_RELOAD */
+  private readonly sniperReloadMs = 2_000;
   private readonly sniperHitRadius = 20;
 
 

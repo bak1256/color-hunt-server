@@ -1614,19 +1614,9 @@ export class MyRoom extends Room {
         return;
       }
       /*
-       * V1010302B_SERVER_FART_PROGRESSION_LOCK_RECOVER: third accident permanently disables detector this round.
+       * V1010386C_SERVER_SIMPLE_THREE_FART_CYCLE_CURRENT_SAFE
+       * No permanent fart lock. poopUntil is the only temporary lock.
        */
-      if (
-        this.fartLockedHunters.has(
-          client.sessionId,
-        )
-      ) {
-        this.sendFartState(
-          client,
-          now,
-        );
-        return;
-      }
 
 
       
@@ -1771,47 +1761,28 @@ const gauge =
           now +
           this.poopDurationMs;
 
-        const nextFartAccidentCount =
-          Math.min(
-            3,
-            (
-              this.fartAccidentCountByHunter.get(
-                client.sessionId,
-              ) ?? 0
-            ) + 1,
-          );
-
+        /*
+         * V1010386C_SERVER_SIMPLE_THREE_FART_CYCLE_CURRENT_SAFE
+         * Third fart causes one accident, then reset immediately.
+         */
         this.fartAccidentCountByHunter.set(
           client.sessionId,
-          nextFartAccidentCount,
+          0,
         );
 
-        
-      const postAccidentGasFloor =
-        nextFartAccidentCount === 1
-          ? 36
-          : nextFartAccidentCount === 2
-            ? 72
-            : 100;
+        this.fartLockedHunters.delete(
+          client.sessionId,
+        );
 
-if (
-          nextFartAccidentCount >= 3
-        ) {
-          this.fartLockedHunters.add(
-            client.sessionId,
-          );
+        this.fartGaugeByHunter.set(
+          client.sessionId,
+          0,
+        );
 
-          /* V1010306_THIRD_ACCIDENT_MAX_COMMIT */
-          this.fartGaugeByHunter.set(
-            client.sessionId,
-            100,
-          );
-
-          this.fartGaugeUpdatedAt.set(
-            client.sessionId,
-            now,
-          );
-        }
+        this.fartGaugeUpdatedAt.set(
+          client.sessionId,
+          now,
+        );
 
         this.poopUntilByHunter.set(
           client.sessionId,
@@ -1840,14 +1811,8 @@ if (
               this.getFartPostPoopFloor(
                 client.sessionId,
               ),
-            accidentCount:
-              this.fartAccidentCountByHunter.get(
-                client.sessionId,
-              ) ?? 0,
-            locked:
-              this.fartLockedHunters.has(
-                client.sessionId,
-              ),
+            accidentCount: 0,
+            locked: false,
             /*
              * V1010266_SERVER_POOP_DETECTED_FLAG: client must not infer combo from message timing.
              */
@@ -2820,32 +2785,9 @@ this.sendPaintReadyState(client);
   /* V1010266_SERVER_POOP_DETECTED_FLAG */
   /* V1010254_RESET_FART_EACH_ROUND */
   private getFartPostPoopFloor(
-    sessionId: string,
+    _sessionId: string,
   ): number {
-    if (
-      this.fartLockedHunters.has(
-        sessionId,
-      )
-    ) {
-      /*
-       * V1010306_SERVER_GAS_THIRD_STAYS_MAX: third accident is MAX forever for this round.
-       */
-      return 100;
-    }
-
-    const accidents =
-      this.fartAccidentCountByHunter.get(
-        sessionId,
-      ) ?? 0;
-
-    if (accidents >= 2) {
-      return 72;
-    }
-
-    if (accidents === 1) {
-      return 36;
-    }
-
+    /* V1010386C_SERVER_SIMPLE_THREE_FART_CYCLE_CURRENT_SAFE: every accident returns to GAS 0. */
     return 0;
   }
 
@@ -2876,35 +2818,10 @@ this.sendPaintReadyState(client);
     let next: number;
 
     if (poopUntil > now) {
-      const remainingMs =
-        Math.max(
-          0,
-          poopUntil - now,
-        );
-
-      const progress =
-        Math.max(
-          0,
-          Math.min(
-            1,
-            remainingMs /
-              this.poopDurationMs,
-          ),
-        );
-
       /*
-       * Accident animation:
-       * first  : 100 -> 36
-       * second : 100 -> 72
-       * third  : 100 -> 0 (locked)
+       * V1010386C_SERVER_SIMPLE_THREE_FART_CYCLE_CURRENT_SAFE: GAS is pinned to 0 for the full 5-second debuff.
        */
-      next =
-        floor +
-        (
-          100 -
-          floor
-        ) *
-          progress;
+      next = 0;
     } else {
       const elapsedSeconds =
         Math.max(
@@ -2961,14 +2878,8 @@ this.sendPaintReadyState(client);
         this.getFartPostPoopFloor(
           client.sessionId,
         ),
-      accidentCount:
-        this.fartAccidentCountByHunter.get(
-          client.sessionId,
-        ) ?? 0,
-      locked:
-        this.fartLockedHunters.has(
-          client.sessionId,
-        ),
+      accidentCount: 0,
+      locked: false,
     });
   }
 

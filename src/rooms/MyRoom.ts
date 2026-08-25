@@ -2361,7 +2361,7 @@ hunterStats.shotsFired += 1;
        * - Hunt timer expiry -> Hiders
        * Shotgun spam remains limited by HEAT/overheat.
        */
-this.resetToLobby();
+      /* V1010464F_FIRST_SHOT_LOBBY_RESET_HOTFIX: never reset a live Hunt after a normal shotgun shot. */
     },
 
     /* V101069F_READY_HANDLER */

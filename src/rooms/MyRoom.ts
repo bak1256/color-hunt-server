@@ -1,3 +1,4 @@
+/* V1010471_READY_DROP_SAFETY_ONLY: real transport drop cancels Lobby/Paint READY only; reconnect/player preservation remains unchanged. */
 /* V1010452_SKILL_SYSTEM_FOUNDATION: role-neutral skill selection foundation; first Hider skills paintball/laser. */
 /* V1010451G_FULL_ASSIST_VICTORY_HISTORY: retain complete Paint Help history for authoritative Hunter victory snapshots. */
 /* V1010451D_LOBBY_READY_ROSTER_BROADCAST: broadcast authoritative READY roster on join/leave/reconnect. */
@@ -4537,6 +4538,36 @@ this.sendPaintReadyState(client);
       client.sessionId,
     );
     this.markConnectionTopologyChanged();
+
+    /*
+     * V1010471_READY_DROP_SAFETY_ONLY
+     *
+     * REAL transport drop invalidates READY immediately.
+     * PlayerState/reconnect reservation/host recovery/fresh handoff remain untouched.
+     */
+    const lobbyReadyWasRemoved =
+      this.lobbyReadySessionIds.delete(
+        client.sessionId,
+      );
+
+    const paintReadyWasRemoved =
+      this.paintReadySessionIds.delete(
+        client.sessionId,
+      );
+
+    if (
+      this.state.phase === "lobby" &&
+      lobbyReadyWasRemoved
+    ) {
+      this.broadcastLobbyReadyState();
+    }
+
+    if (
+      this.state.phase === "paint" &&
+      paintReadyWasRemoved
+    ) {
+      this.broadcastPaintReadyState();
+    }
 
     this.updateRoomMetadata();
     this.syncRoomListingVisibility();

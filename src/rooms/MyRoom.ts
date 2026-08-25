@@ -51,6 +51,11 @@ type HunterAimMessage = {
   angle?: number;
 };
 
+/* V1010453_SNIPER_SUPPORT_MODE */
+type SniperToggleMessage = { active?: boolean };
+type SniperAimMessage = { x?: number; y?: number };
+type SniperFireMessage = { x?: number; y?: number };
+
 type FartUseMessage = {
   pressedAt?: number;
 };
@@ -354,6 +359,16 @@ export class MyRoom extends Room {
 
   private readonly lastShotAt =
     new Map<string, number>();
+
+  /* V1010453_SNIPER_SUPPORT_MODE */
+  private readonly sniperActiveHunters = new Set<string>();
+  private readonly lastSniperAimAt = new Map<string, number>();
+  private readonly lastSniperFireAt = new Map<string, number>();
+  private readonly sniperAvailableRemainingMs = 30_000;
+  private readonly sniperWarningRemainingMs = 35_000;
+  private readonly sniperReloadMs = 3_000;
+  private readonly sniperHitRadius = 20;
+
 
   private readonly weaponHeatStates =
     new Map<string, WeaponHeatState>();
@@ -1229,7 +1244,11 @@ export class MyRoom extends Room {
 
       if (
         !player ||
-        !player.alive
+        !player.alive ||
+        (
+          player.role === "hunter" &&
+          this.sniperActiveHunters.has(client.sessionId)
+        )
       ) {
         return;
       }
@@ -1840,6 +1859,146 @@ if (
         client,
         now,
       );
+    },
+
+    /* V1010453_SNIPER_SUPPORT_MODE */
+    sniper_toggle: (
+      client: Client,
+      message: SniperToggleMessage,
+    ): void => {
+      if (this.state.phase !== "hunt") return;
+
+      const hunter = this.state.players.get(client.sessionId);
+      if (!hunter || hunter.role !== "hunter" || !hunter.alive) return;
+
+      const remainingMs = Math.max(0, this.state.phaseEndsAt - Date.now());
+      const wantsActive = Boolean(message?.active);
+
+      if (wantsActive && remainingMs > this.sniperAvailableRemainingMs) {
+        client.send("sniper_state", {
+          sessionId: client.sessionId,
+          active: false,
+          available: false,
+          remainingMs,
+          serverNow: Date.now(),
+        });
+        return;
+      }
+
+      if (wantsActive) {
+        this.sniperActiveHunters.add(client.sessionId);
+      } else {
+        this.sniperActiveHunters.delete(client.sessionId);
+      }
+
+      this.broadcast("sniper_state", {
+        sessionId: client.sessionId,
+        active: wantsActive,
+        available: remainingMs <= this.sniperAvailableRemainingMs,
+        remainingMs,
+        serverNow: Date.now(),
+      });
+    },
+
+    sniper_aim: (
+      client: Client,
+      message: SniperAimMessage,
+    ): void => {
+      if (
+        this.state.phase !== "hunt" ||
+        !this.sniperActiveHunters.has(client.sessionId)
+      ) return;
+
+      const hunter = this.state.players.get(client.sessionId);
+      if (!hunter || hunter.role !== "hunter" || !hunter.alive) return;
+
+      const x = Number(message?.x);
+      const y = Number(message?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+      const now = Date.now();
+      const previous = this.lastSniperAimAt.get(client.sessionId) ?? 0;
+      if (now - previous < 66) return;
+      this.lastSniperAimAt.set(client.sessionId, now);
+
+      this.broadcast("sniper_aim", {
+        sessionId: client.sessionId,
+        x: Math.max(0, Math.min(960, x)),
+        y: Math.max(0, Math.min(540, y)),
+      });
+    },
+
+    sniper_fire: (
+      client: Client,
+      message: SniperFireMessage,
+    ): void => {
+      if (
+        this.state.phase !== "hunt" ||
+        !this.sniperActiveHunters.has(client.sessionId)
+      ) return;
+
+      const hunter = this.state.players.get(client.sessionId);
+      if (!hunter || hunter.role !== "hunter" || !hunter.alive) return;
+
+      const remainingMs = Math.max(0, this.state.phaseEndsAt - Date.now());
+      if (remainingMs > this.sniperAvailableRemainingMs) return;
+
+      const x = Math.max(0, Math.min(960, Number(message?.x)));
+      const y = Math.max(0, Math.min(540, Number(message?.y)));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+      const now = Date.now();
+      const previous = this.lastSniperFireAt.get(client.sessionId) ?? 0;
+      if (now - previous < this.sniperReloadMs) {
+        client.send("sniper_reload", {
+          readyAt: previous + this.sniperReloadMs,
+          serverNow: now,
+        });
+        return;
+      }
+      this.lastSniperFireAt.set(client.sessionId, now);
+
+      let hitId = "";
+      let bestDistance = Number.POSITIVE_INFINITY;
+
+      for (const [sessionId, target] of this.state.players) {
+        if (target.role !== "hider" || !target.alive) continue;
+        const distance = Math.hypot(target.x - x, target.y - y);
+        if (distance <= this.sniperHitRadius && distance < bestDistance) {
+          bestDistance = distance;
+          hitId = sessionId;
+        }
+      }
+
+      if (hitId) {
+        const target = this.state.players.get(hitId);
+        if (target && target.role === "hider" && target.alive) {
+          if (!this.victoryFoundHiders.some((entry) => entry.sessionId === hitId)) {
+            this.victoryFoundHiders.push({
+              sessionId: hitId,
+              name: String(target.name ?? "Hider").slice(0, 32),
+              x: target.x,
+              y: target.y,
+              foundOrder: this.victoryFoundHiders.length + 1,
+              foundAt: now,
+            });
+          }
+          target.alive = false;
+        }
+      }
+
+      this.broadcast("sniper_fired", {
+        shooterId: client.sessionId,
+        x,
+        y,
+        hitId,
+        readyAt: now + this.sniperReloadMs,
+        serverNow: now,
+      });
+
+      if (hitId && this.getAliveHiderCount() === 0) {
+        this.finishGame("hunters");
+      }
     },
 
     hunter_aim: (
@@ -5751,6 +5910,12 @@ this.sendPaintReadyState(client);
 
     this.state.phase = "hunt";
 
+    /* V1010453_SNIPER_SUPPORT_MODE: each Hunt starts clean. */
+    this.sniperActiveHunters.clear();
+    this.lastSniperAimAt.clear();
+    this.lastSniperFireAt.clear();
+
+
 
     this.state.phaseEndsAt =
       Date.now() +
@@ -5888,6 +6053,9 @@ this.sendPaintReadyState(client);
     this.state.winner = winner;
     this.state.phase = "finished";
 
+    this.sniperActiveHunters.clear();
+
+
     this.state.phaseEndsAt =
       Date.now() +
       this.resultDurationMs;
@@ -5996,6 +6164,10 @@ this.sendPaintReadyState(client);
     this.poopUntilByHunter.clear();
     this.poopLaughTriggeredHunters.clear();
     this.state.phase = "lobby";
+
+    this.sniperActiveHunters.clear();
+    this.lastSniperAimAt.clear();
+    this.lastSniperFireAt.clear();
     this.state.phaseEndsAt = 0;
 
     this.hunterDisconnectOutcomeGeneration += 1;

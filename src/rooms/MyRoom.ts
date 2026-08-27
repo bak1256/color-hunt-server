@@ -1,3 +1,4 @@
+/* V1010526B_VULCAN_1P5X: authoritative tick 45ms->60ms; hitbox untouched. */
 /* V1010524B_VULCAN_DOUBLE_ROF_SERVER: recursive authoritative Vulcan hit tick 90ms->45ms; elapsed-time heat remains 3s. */
 /* V1010521G_VULCAN_SERVER_HEAT_RESULT_CLEAN_HIDER_OUTLINE_CURRENT_SOURCE: streams authoritative accumulated Vulcan HEAT every firing tick. */
 /* V1010519_VULCAN_CONTINUOUS_HEAT_SPECTATOR_SYNC_DARK_ALIGN: authoritative accumulated Vulcan heat; partial rest cools, only 100% overheat locks for 3s. */
@@ -2512,13 +2513,13 @@ const gauge =
 
           this.clock.setTimeout(
             tick,
-            45,
+            60,
           );
         };
 
       this.clock.setTimeout(
             tick,
-            45,
+            60,
           );
     },
 

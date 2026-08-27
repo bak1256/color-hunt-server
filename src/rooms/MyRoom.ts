@@ -1,3 +1,4 @@
+/* V1010532B_VULCAN_RADIUS15_EXACT_SOURCE: authoritative random Vulcan impact center is radius 15px / diameter 30px around live mouse aim. */
 /* V1010530_VULCAN_CIRCULAR_RANDOM_IMPACT: spotlight ellipse visual-only; damage follows server-random circular impacts. */
 /* V1010526B_VULCAN_1P5X: authoritative tick 45ms->60ms; hitbox untouched. */
 /* V1010524B_VULCAN_DOUBLE_ROF_SERVER: recursive authoritative Vulcan hit tick 90ms->45ms; elapsed-time heat remains 3s. */
@@ -2403,7 +2404,7 @@ const gauge =
            *   for the actual Hider hit test.
            */
           const spreadRadius =
-            58;
+            15;
 
           const hitRadius =
             22;

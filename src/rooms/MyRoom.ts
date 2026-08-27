@@ -1,3 +1,4 @@
+/* V1010510_VULCAN_HOLD_FIRE_CINEMATIC_SEARCHLIGHT: authoritative Vulcan hold-fire / proportional cooldown. */
 /* V1010508_VULCAN_SEARCHLIGHT_COOLDOWN_CINEMATIC: selected Vulcan persists; 6s authoritative repeat-fire cooldown. */
 /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: server-authoritative mutually-exclusive tactical support. */
 /* V1010471_READY_DROP_SAFETY_ONLY: real transport drop cancels Lobby/Paint READY only; reconnect/player preservation remains unchanged. */
@@ -63,6 +64,8 @@ type SniperFireMessage = { x?: number; y?: number };
 type VulcanToggleMessage = { active?: boolean };
 type VulcanAimMessage = { x?: number; y?: number };
 type VulcanFireMessage = { x?: number; y?: number };
+type VulcanFireStartMessage = Record<string, never>;
+type VulcanFireStopMessage = Record<string, never>;
 
 type FartUseMessage = {
   pressedAt?: number;
@@ -387,6 +390,10 @@ export class MyRoom extends Room {
   private readonly vulcanCooldownMs = 6_000;
   private readonly vulcanHitRadiusX = 105;
   private readonly vulcanHitRadiusY = 66;
+  private readonly vulcanAimByHunter = new Map<string, { x: number; y: number }>();
+  private readonly vulcanFiringStartedAt = new Map<string, number>();
+  private readonly vulcanCoolingUntil = new Map<string, number>();
+  private readonly vulcanFireGeneration = new Map<string, number>();
 
 
   private readonly weaponHeatStates =
@@ -451,6 +458,28 @@ export class MyRoom extends Room {
   private readonly heatPerShot = 34;
   private readonly heatCooldownPerMs = 0.025;
   private readonly overheatDurationMs = 2_500;
+
+  private stopVulcanHoldFire(sessionId: string, now = Date.now()): void {
+    const startedAt = this.vulcanFiringStartedAt.get(sessionId);
+    if (!startedAt) return;
+    this.vulcanFiringStartedAt.delete(sessionId);
+    this.vulcanFireGeneration.set(sessionId, (this.vulcanFireGeneration.get(sessionId) ?? 0) + 1);
+
+    const heldMs = Math.max(80, Math.min(this.vulcanDurationMs, now - startedAt));
+    const cooldownMs = Math.round(heldMs * 2);
+    const readyAt = now + cooldownMs;
+    this.vulcanCoolingUntil.set(sessionId, readyAt);
+
+    this.broadcast('vulcan_firing', {
+      shooterId: sessionId,
+      active: false,
+      startedAt,
+      heldMs,
+      cooldownMs,
+      readyAt,
+      serverNow: now,
+    });
+  }
 
   private broadcastPhaseChanged(): void {
     this.broadcast(
@@ -2035,75 +2064,100 @@ const gauge =
       const previous = this.lastVulcanAimAt.get(client.sessionId) ?? 0;
       if (now - previous < 66) return;
       this.lastVulcanAimAt.set(client.sessionId, now);
+      const aimX = Math.max(0, Math.min(960, x));
+      const aimY = Math.max(0, Math.min(540, y));
+      this.vulcanAimByHunter.set(client.sessionId, { x: aimX, y: aimY });
       this.broadcast('vulcan_aim', {
         sessionId: client.sessionId,
-        x: Math.max(0, Math.min(960, x)),
-        y: Math.max(0, Math.min(540, y)),
+        x: aimX,
+        y: aimY,
       });
     },
 
-    vulcan_fire: (
+    vulcan_fire_start: (
       client: Client,
-      message: VulcanFireMessage,
+      _message: VulcanFireStartMessage,
     ): void => {
       if (this.state.phase !== 'hunt' || !this.vulcanActiveHunters.has(client.sessionId)) return;
       const hunter = this.state.players.get(client.sessionId);
       if (!hunter || hunter.role !== 'hunter' || !hunter.alive) return;
-      const x = Math.max(0, Math.min(960, Number(message?.x)));
-      const y = Math.max(0, Math.min(540, Number(message?.y)));
-      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
 
       const now = Date.now();
-      const previousFireAt = this.lastVulcanFireAt.get(client.sessionId) ?? 0;
-      if (now - previousFireAt < this.vulcanCooldownMs) return;
-      this.lastVulcanFireAt.set(client.sessionId, now);
-      const readyAt = now + this.vulcanCooldownMs;
-      const seed = Math.floor(Math.random() * 0x7fffffff);
-      const hitIds = [];
-      for (const [sessionId, target] of this.state.players) {
-        if (target.role !== 'hider' || !target.alive) continue;
-        const nx = (target.x - x) / this.vulcanHitRadiusX;
-        const ny = (target.y - y) / this.vulcanHitRadiusY;
-        if (nx * nx + ny * ny > 1) continue;
+      if ((this.vulcanCoolingUntil.get(client.sessionId) ?? 0) > now) return;
+      if (this.vulcanFiringStartedAt.has(client.sessionId)) return;
 
-        // Area support is powerful but deliberately non-guaranteed. Center is much more dangerous.
-        const normalized = Math.min(1, Math.sqrt(nx * nx + ny * ny));
-        const chance = 0.92 - normalized * 0.50;
-        let z = (seed ^ sessionId.length ^ Math.floor(target.x * 31 + target.y * 17)) >>> 0;
-        z = (Math.imul(z ^ (z >>> 16), 2246822507) ^ Math.imul(z ^ (z >>> 13), 3266489909)) >>> 0;
-        const roll = (z >>> 0) / 4294967296;
-        if (roll > chance) continue;
-
-        target.alive = false;
-        hitIds.push(sessionId);
-        if (!this.victoryFoundHiders.some((entry) => entry.sessionId === sessionId)) {
-          this.victoryFoundHiders.push({
-            sessionId,
-            name: String(target.name ?? 'Hider').slice(0, 32),
-            x: target.x,
-            y: target.y,
-            foundOrder: this.victoryFoundHiders.length + 1,
-            foundAt: now,
-          });
-        }
-      }
-
-      this.broadcast('vulcan_fired', {
+      this.vulcanFiringStartedAt.set(client.sessionId, now);
+      const generation = (this.vulcanFireGeneration.get(client.sessionId) ?? 0) + 1;
+      this.vulcanFireGeneration.set(client.sessionId, generation);
+      this.broadcast('vulcan_firing', {
         shooterId: client.sessionId,
-        x, y, seed,
+        active: true,
         startedAt: now,
-        durationMs: this.vulcanDurationMs,
-        hitIds,
-        readyAt,
+        heldMs: 0,
+        cooldownMs: 0,
+        readyAt: now,
         serverNow: now,
       });
 
-      this.clock.setTimeout(() => {
-        // Vulcan support stays active after a burst. Only the gun cools down.
-        if (hitIds.length > 0 && this.getAliveHiderCount() === 0) this.finishGame('hunters');
-      }, this.vulcanDurationMs);
+      const tick = (): void => {
+        if (
+          this.state.phase !== 'hunt' ||
+          !this.vulcanActiveHunters.has(client.sessionId) ||
+          this.vulcanFireGeneration.get(client.sessionId) !== generation
+        ) return;
+        const startedAt = this.vulcanFiringStartedAt.get(client.sessionId);
+        if (!startedAt) return;
+        const tickNow = Date.now();
+        const heldMs = Math.min(this.vulcanDurationMs, tickNow - startedAt);
+        const aim = this.vulcanAimByHunter.get(client.sessionId) ?? { x: 480, y: 270 };
+
+        for (const [sessionId, target] of this.state.players) {
+          if (target.role !== 'hider' || !target.alive) continue;
+          const nx = (target.x - aim.x) / this.vulcanHitRadiusX;
+          const ny = (target.y - aim.y) / this.vulcanHitRadiusY;
+          const d2 = nx * nx + ny * ny;
+          if (d2 > 1) continue;
+          const normalized = Math.min(1, Math.sqrt(d2));
+          const perTickChance = 0.095 - normalized * 0.055;
+          if (Math.random() > perTickChance) continue;
+          target.alive = false;
+          if (!this.victoryFoundHiders.some((entry) => entry.sessionId === sessionId)) {
+            this.victoryFoundHiders.push({
+              sessionId,
+              name: String(target.name ?? 'Hider').slice(0,32),
+              x: target.x,
+              y: target.y,
+              foundOrder: this.victoryFoundHiders.length + 1,
+              foundAt: tickNow,
+            });
+          }
+        }
+
+        if (this.getAliveHiderCount() === 0) {
+          this.finishGame('hunters');
+          return;
+        }
+        if (heldMs >= this.vulcanDurationMs) {
+          this.stopVulcanHoldFire(client.sessionId, tickNow);
+          return;
+        }
+        this.clock.setTimeout(tick, 90);
+      };
+      this.clock.setTimeout(tick, 90);
     },
 
+    vulcan_fire_stop: (
+      client: Client,
+      _message: VulcanFireStopMessage,
+    ): void => {
+      this.stopVulcanHoldFire(client.sessionId, Date.now());
+    },
+
+    /* Legacy one-click packet is intentionally ignored after v510. */
+    vulcan_fire: (
+      _client: Client,
+      _message: VulcanFireMessage,
+    ): void => {},
     hunter_aim: (
       client: Client,
       message: HunterAimMessage,
@@ -2118,6 +2172,10 @@ const gauge =
         this.state.players.get(
           client.sessionId,
         );
+
+      if (this.vulcanActiveHunters.has(client.sessionId)) {
+        return;
+      }
 
       const angle =
         Number(message.angle);
@@ -5947,6 +6005,10 @@ this.sendPaintReadyState(client);
     this.lastSniperAimAt.clear();
     this.lastSniperFireAt.clear();
     this.vulcanActiveHunters.clear();
+    this.vulcanAimByHunter.clear();
+    this.vulcanFiringStartedAt.clear();
+    this.vulcanCoolingUntil.clear();
+    this.vulcanFireGeneration.clear();
     this.tacticalSupportCommittedHunters.clear();
     this.lastVulcanAimAt.clear();
     this.lastVulcanFireAt.clear();
@@ -6205,6 +6267,10 @@ this.sendPaintReadyState(client);
     this.lastSniperAimAt.clear();
     this.lastSniperFireAt.clear();
     this.vulcanActiveHunters.clear();
+    this.vulcanAimByHunter.clear();
+    this.vulcanFiringStartedAt.clear();
+    this.vulcanCoolingUntil.clear();
+    this.vulcanFireGeneration.clear();
     this.tacticalSupportCommittedHunters.clear();
     this.lastVulcanAimAt.clear();
     this.lastVulcanFireAt.clear();

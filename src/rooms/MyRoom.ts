@@ -1,3 +1,4 @@
+/* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: server-authoritative mutually-exclusive tactical support. */
 /* V1010471_READY_DROP_SAFETY_ONLY: real transport drop cancels Lobby/Paint READY only; reconnect/player preservation remains unchanged. */
 /* V1010452_SKILL_SYSTEM_FOUNDATION: role-neutral skill selection foundation; first Hider skills paintball/laser. */
 /* V1010451G_FULL_ASSIST_VICTORY_HISTORY: retain complete Paint Help history for authoritative Hunter victory snapshots. */
@@ -56,6 +57,11 @@ type HunterAimMessage = {
 type SniperToggleMessage = { active?: boolean };
 type SniperAimMessage = { x?: number; y?: number };
 type SniperFireMessage = { x?: number; y?: number };
+
+/* V1010507_TACTICAL_VULCAN_AIR_SUPPORT */
+type VulcanToggleMessage = { active?: boolean };
+type VulcanAimMessage = { x?: number; y?: number };
+type VulcanFireMessage = { x?: number; y?: number };
 
 type FartUseMessage = {
   pressedAt?: number;
@@ -370,6 +376,15 @@ export class MyRoom extends Room {
   /* V1010453E_SNIPER_2S_RELOAD */
   private readonly sniperReloadMs = 2_000;
   private readonly sniperHitRadius = 20;
+
+  /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: support choice is mutually exclusive per hunter/round. */
+  private readonly vulcanActiveHunters = new Set<string>();
+  private readonly tacticalSupportCommittedHunters = new Set<string>();
+  private readonly lastVulcanAimAt = new Map<string, number>();
+  private readonly vulcanFiredHunters = new Set<string>();
+  private readonly vulcanDurationMs = 3_000;
+  private readonly vulcanHitRadiusX = 105;
+  private readonly vulcanHitRadiusY = 66;
 
 
   private readonly weaponHeatStates =
@@ -1249,7 +1264,10 @@ export class MyRoom extends Room {
         !player.alive ||
         (
           player.role === "hunter" &&
-          this.sniperActiveHunters.has(client.sessionId)
+          (
+            this.sniperActiveHunters.has(client.sessionId) ||
+            this.vulcanActiveHunters.has(client.sessionId)
+          )
         )
       ) {
         return;
@@ -1853,6 +1871,9 @@ const gauge =
       }
 
       if (wantsActive) {
+        if (this.tacticalSupportCommittedHunters.has(client.sessionId)) return;
+        this.tacticalSupportCommittedHunters.add(client.sessionId);
+        this.vulcanActiveHunters.delete(client.sessionId);
         this.sniperActiveHunters.add(client.sessionId);
       } else {
         this.sniperActiveHunters.delete(client.sessionId);
@@ -1966,6 +1987,121 @@ const gauge =
       if (hitId && this.getAliveHiderCount() === 0) {
         this.finishGame("hunters");
       }
+    },
+
+    /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: area-search alternative to sniper. */
+    vulcan_toggle: (
+      client: Client,
+      message: VulcanToggleMessage,
+    ): void => {
+      if (this.state.phase !== 'hunt') return;
+      const hunter = this.state.players.get(client.sessionId);
+      if (!hunter || hunter.role !== 'hunter' || !hunter.alive) return;
+      const remainingMs = Math.max(0, this.state.phaseEndsAt - Date.now());
+      const wantsActive = Boolean(message?.active);
+      if (wantsActive && remainingMs > this.sniperAvailableRemainingMs) return;
+
+      if (wantsActive) {
+        if (this.tacticalSupportCommittedHunters.has(client.sessionId)) return;
+        this.tacticalSupportCommittedHunters.add(client.sessionId);
+        this.sniperActiveHunters.delete(client.sessionId);
+        this.vulcanActiveHunters.add(client.sessionId);
+      } else {
+        this.vulcanActiveHunters.delete(client.sessionId);
+      }
+
+      this.broadcast('vulcan_state', {
+        sessionId: client.sessionId,
+        active: wantsActive,
+        available: remainingMs <= this.sniperAvailableRemainingMs,
+        remainingMs,
+        serverNow: Date.now(),
+      });
+    },
+
+    vulcan_aim: (
+      client: Client,
+      message: VulcanAimMessage,
+    ): void => {
+      if (this.state.phase !== 'hunt' || !this.vulcanActiveHunters.has(client.sessionId)) return;
+      const hunter = this.state.players.get(client.sessionId);
+      if (!hunter || hunter.role !== 'hunter' || !hunter.alive) return;
+      const x = Number(message?.x);
+      const y = Number(message?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      const now = Date.now();
+      const previous = this.lastVulcanAimAt.get(client.sessionId) ?? 0;
+      if (now - previous < 66) return;
+      this.lastVulcanAimAt.set(client.sessionId, now);
+      this.broadcast('vulcan_aim', {
+        sessionId: client.sessionId,
+        x: Math.max(0, Math.min(960, x)),
+        y: Math.max(0, Math.min(540, y)),
+      });
+    },
+
+    vulcan_fire: (
+      client: Client,
+      message: VulcanFireMessage,
+    ): void => {
+      if (this.state.phase !== 'hunt' || !this.vulcanActiveHunters.has(client.sessionId)) return;
+      if (this.vulcanFiredHunters.has(client.sessionId)) return;
+      const hunter = this.state.players.get(client.sessionId);
+      if (!hunter || hunter.role !== 'hunter' || !hunter.alive) return;
+      const x = Math.max(0, Math.min(960, Number(message?.x)));
+      const y = Math.max(0, Math.min(540, Number(message?.y)));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+
+      this.vulcanFiredHunters.add(client.sessionId);
+      const now = Date.now();
+      const seed = Math.floor(Math.random() * 0x7fffffff);
+      const hitIds = [];
+      for (const [sessionId, target] of this.state.players) {
+        if (target.role !== 'hider' || !target.alive) continue;
+        const nx = (target.x - x) / this.vulcanHitRadiusX;
+        const ny = (target.y - y) / this.vulcanHitRadiusY;
+        if (nx * nx + ny * ny > 1) continue;
+
+        // Area support is powerful but deliberately non-guaranteed. Center is much more dangerous.
+        const normalized = Math.min(1, Math.sqrt(nx * nx + ny * ny));
+        const chance = 0.92 - normalized * 0.50;
+        let z = (seed ^ sessionId.length ^ Math.floor(target.x * 31 + target.y * 17)) >>> 0;
+        z = (Math.imul(z ^ (z >>> 16), 2246822507) ^ Math.imul(z ^ (z >>> 13), 3266489909)) >>> 0;
+        const roll = (z >>> 0) / 4294967296;
+        if (roll > chance) continue;
+
+        target.alive = false;
+        hitIds.push(sessionId);
+        if (!this.victoryFoundHiders.some((entry) => entry.sessionId === sessionId)) {
+          this.victoryFoundHiders.push({
+            sessionId,
+            name: String(target.name ?? 'Hider').slice(0, 32),
+            x: target.x,
+            y: target.y,
+            foundOrder: this.victoryFoundHiders.length + 1,
+            foundAt: now,
+          });
+        }
+      }
+
+      this.broadcast('vulcan_fired', {
+        shooterId: client.sessionId,
+        x, y, seed,
+        startedAt: now,
+        durationMs: this.vulcanDurationMs,
+        hitIds,
+        serverNow: now,
+      });
+
+      this.clock.setTimeout(() => {
+        this.vulcanActiveHunters.delete(client.sessionId);
+        this.broadcast('vulcan_state', {
+          sessionId: client.sessionId, active: false, available: false,
+          remainingMs: Math.max(0, this.state.phaseEndsAt - Date.now()),
+          serverNow: Date.now(),
+        });
+        if (hitIds.length > 0 && this.getAliveHiderCount() === 0) this.finishGame('hunters');
+      }, this.vulcanDurationMs);
     },
 
     hunter_aim: (
@@ -5810,6 +5946,10 @@ this.sendPaintReadyState(client);
     this.sniperActiveHunters.clear();
     this.lastSniperAimAt.clear();
     this.lastSniperFireAt.clear();
+    this.vulcanActiveHunters.clear();
+    this.tacticalSupportCommittedHunters.clear();
+    this.lastVulcanAimAt.clear();
+    this.vulcanFiredHunters.clear();
 
 
 
@@ -6064,6 +6204,10 @@ this.sendPaintReadyState(client);
     this.sniperActiveHunters.clear();
     this.lastSniperAimAt.clear();
     this.lastSniperFireAt.clear();
+    this.vulcanActiveHunters.clear();
+    this.tacticalSupportCommittedHunters.clear();
+    this.lastVulcanAimAt.clear();
+    this.vulcanFiredHunters.clear();
     this.state.phaseEndsAt = 0;
 
     this.hunterDisconnectOutcomeGeneration += 1;

@@ -1,3 +1,4 @@
+/* V1010530_VULCAN_CIRCULAR_RANDOM_IMPACT: spotlight ellipse visual-only; damage follows server-random circular impacts. */
 /* V1010526B_VULCAN_1P5X: authoritative tick 45ms->60ms; hitbox untouched. */
 /* V1010524B_VULCAN_DOUBLE_ROF_SERVER: recursive authoritative Vulcan hit tick 90ms->45ms; elapsed-time heat remains 3s. */
 /* V1010521G_VULCAN_SERVER_HEAT_RESULT_CLEAN_HIDER_OUTLINE_CURRENT_SOURCE: streams authoritative accumulated Vulcan HEAT every firing tick. */
@@ -2390,6 +2391,86 @@ const gauge =
               y: 270,
             };
 
+          /*
+           * V1010530_VULCAN_CIRCULAR_RANDOM_IMPACT
+           *
+           * IMPORTANT:
+           * - The animated spotlight ellipse remains 100% VISUAL.
+           * - Damage no longer uses vulcanHitRadiusX/Y.
+           * - Every authoritative 60ms tick chooses ONE random impact point
+           *   inside a small circle around the live mouse aim.
+           * - The SAME impact coordinate is broadcast to clients and used
+           *   for the actual Hider hit test.
+           */
+          const spreadRadius =
+            58;
+
+          const hitRadius =
+            22;
+
+          const angle =
+            Math.random() *
+            Math.PI *
+            2;
+
+          // sqrt() makes random points uniform across the circle's AREA.
+          const distance =
+            Math.sqrt(
+              Math.random(),
+            ) *
+            spreadRadius;
+
+          const impactX =
+            Math.max(
+              0,
+              Math.min(
+                960,
+                aim.x +
+                  Math.cos(
+                    angle,
+                  ) *
+                    distance,
+              ),
+            );
+
+          const impactY =
+            Math.max(
+              0,
+              Math.min(
+                540,
+                aim.y +
+                  Math.sin(
+                    angle,
+                  ) *
+                    distance,
+              ),
+            );
+
+          /*
+           * One authoritative visual/damage coordinate.
+           * Existing clients that don't listen to this packet simply ignore it;
+           * the server hit logic below remains authoritative.
+           */
+          this.broadcast(
+            'vulcan_fired',
+            {
+              shooterId:
+                client.sessionId,
+              x:
+                impactX,
+              y:
+                impactY,
+              radius:
+                hitRadius,
+              serverNow:
+                tickNow,
+            },
+          );
+
+          const hitRadiusSq =
+            hitRadius *
+            hitRadius;
+
           for (
             const [
               sessionId,
@@ -2405,43 +2486,21 @@ const gauge =
               continue;
             }
 
-            const nx =
-              (
-                target.x -
-                aim.x
-              ) /
-              this.vulcanHitRadiusX;
+            const dx =
+              target.x -
+              impactX;
 
-            const ny =
-              (
-                target.y -
-                aim.y
-              ) /
-              this.vulcanHitRadiusY;
-
-            const d2 =
-              nx *
-                nx +
-              ny *
-                ny;
+            const dy =
+              target.y -
+              impactY;
 
             if (
-              d2 >
-              1
+              dx * dx +
+                dy * dy >
+              hitRadiusSq
             ) {
               continue;
             }
-
-            /*
-             * V1010529B_VULCAN_RELIABLE_AREA_HIT:
-             * The server already authoritatively confirmed that this living
-             * Hider is inside the Vulcan ellipse (d2 <= 1). Do not roll a
-             * second random hit lottery here: that made sustained Vulcan fire
-             * visibly pass over valid targets without registering a hit.
-             *
-             * Keep the existing ellipse/hitbox untouched; only remove the
-             * probabilistic rejection after the authoritative overlap test.
-             */
 
             target.alive =
               false;

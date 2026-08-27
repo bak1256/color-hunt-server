@@ -1,3 +1,4 @@
+/* V1010519_VULCAN_CONTINUOUS_HEAT_SPECTATOR_SYNC_DARK_ALIGN: authoritative accumulated Vulcan heat; partial rest cools, only 100% overheat locks for 3s. */
 /* V1010510_VULCAN_HOLD_FIRE_CINEMATIC_SEARCHLIGHT: authoritative Vulcan hold-fire / proportional cooldown. */
 /* V1010508_VULCAN_SEARCHLIGHT_COOLDOWN_CINEMATIC: selected Vulcan persists; 6s authoritative repeat-fire cooldown. */
 /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: server-authoritative mutually-exclusive tactical support. */
@@ -20,6 +21,21 @@ import {
   MyRoomState,
   PlayerState,
 } from "./schema/MyRoomState.js";
+
+function PhaserMathClampServer(
+  value: number,
+  min: number,
+  max: number,
+): number {
+  return Math.max(
+    min,
+    Math.min(
+      max,
+      value,
+    ),
+  );
+}
+
 
 type JoinOptions = {
   name?: string;
@@ -392,6 +408,9 @@ export class MyRoom extends Room {
   private readonly vulcanHitRadiusY = 66;
   private readonly vulcanAimByHunter = new Map<string, { x: number; y: number }>();
   private readonly vulcanFiringStartedAt = new Map<string, number>();
+  private readonly vulcanHeatByHunter = new Map<string, number>();
+  private readonly vulcanHeatUpdatedAt = new Map<string, number>();
+
   private readonly vulcanCoolingUntil = new Map<string, number>();
   private readonly vulcanFireGeneration = new Map<string, number>();
 
@@ -459,26 +478,160 @@ export class MyRoom extends Room {
   private readonly heatCooldownPerMs = 0.025;
   private readonly overheatDurationMs = 2_500;
 
-  private stopVulcanHoldFire(sessionId: string, now = Date.now()): void {
-    const startedAt = this.vulcanFiringStartedAt.get(sessionId);
-    if (!startedAt) return;
-    this.vulcanFiringStartedAt.delete(sessionId);
-    this.vulcanFireGeneration.set(sessionId, (this.vulcanFireGeneration.get(sessionId) ?? 0) + 1);
 
-    const heldMs = Math.max(80, Math.min(this.vulcanDurationMs, now - startedAt));
-    const cooldownMs = Math.round(heldMs * 2);
-    const readyAt = now + cooldownMs;
-    this.vulcanCoolingUntil.set(sessionId, readyAt);
+  private updateVulcanHeat(
+    sessionId: string,
+    now: number,
+    firing: boolean,
+  ): number {
+    const previousHeat =
+      PhaserMathClampServer(
+        this.vulcanHeatByHunter.get(
+          sessionId,
+        ) ??
+        0,
+        0,
+        1,
+      );
 
-    this.broadcast('vulcan_firing', {
-      shooterId: sessionId,
-      active: false,
-      startedAt,
-      heldMs,
-      cooldownMs,
-      readyAt,
-      serverNow: now,
-    });
+    const lastUpdatedAt =
+      this.vulcanHeatUpdatedAt.get(
+        sessionId,
+      ) ??
+      now;
+
+    const elapsed =
+      Math.max(
+        0,
+        Math.min(
+          3_000,
+          now -
+            lastUpdatedAt,
+        ),
+      );
+
+    let nextHeat =
+      firing
+        ? previousHeat +
+          elapsed /
+            3_000
+        : previousHeat -
+          elapsed /
+            3_000;
+
+    nextHeat =
+      PhaserMathClampServer(
+        nextHeat,
+        0,
+        1,
+      );
+
+    this.vulcanHeatByHunter.set(
+      sessionId,
+      nextHeat,
+    );
+
+    this.vulcanHeatUpdatedAt.set(
+      sessionId,
+      now,
+    );
+
+    return nextHeat;
+  }
+
+  private stopVulcanHoldFire(
+    sessionId: string,
+    now = Date.now(),
+    overheated = false,
+  ): void {
+    const startedAt =
+      this.vulcanFiringStartedAt.get(
+        sessionId,
+      );
+
+    if (!startedAt) {
+      return;
+    }
+
+    const heat =
+      this.updateVulcanHeat(
+        sessionId,
+        now,
+        true,
+      );
+
+    this.vulcanFiringStartedAt.delete(
+      sessionId,
+    );
+
+    this.vulcanFireGeneration.set(
+      sessionId,
+      (
+        this.vulcanFireGeneration.get(
+          sessionId,
+        ) ??
+        0
+      ) +
+      1,
+    );
+
+    const isOverheated =
+      overheated ||
+      heat >=
+        0.999;
+
+    const cooldownMs =
+      isOverheated
+        ? 3_000
+        : 0;
+
+    const readyAt =
+      now +
+      cooldownMs;
+
+    if (
+      isOverheated
+    ) {
+      this.vulcanHeatByHunter.set(
+        sessionId,
+        1,
+      );
+
+      this.vulcanHeatUpdatedAt.set(
+        sessionId,
+        now,
+      );
+
+      this.vulcanCoolingUntil.set(
+        sessionId,
+        readyAt,
+      );
+    } else {
+      this.vulcanCoolingUntil.delete(
+        sessionId,
+      );
+    }
+
+    this.broadcast(
+      'vulcan_firing',
+      {
+        shooterId:
+          sessionId,
+        active:
+          false,
+        startedAt,
+        heldMs:
+          Math.max(
+            0,
+            now -
+              startedAt,
+          ),
+        cooldownMs,
+        readyAt,
+        serverNow:
+          now,
+      },
+    );
   }
 
   private broadcastPhaseChanged(): void {
@@ -2078,86 +2231,278 @@ const gauge =
       client: Client,
       _message: VulcanFireStartMessage,
     ): void => {
-      if (this.state.phase !== 'hunt' || !this.vulcanActiveHunters.has(client.sessionId)) return;
-      const hunter = this.state.players.get(client.sessionId);
-      if (!hunter || hunter.role !== 'hunter' || !hunter.alive) return;
+      if (
+        this.state.phase !== 'hunt' ||
+        !this.vulcanActiveHunters.has(client.sessionId)
+      ) return;
 
-      const now = Date.now();
-      if ((this.vulcanCoolingUntil.get(client.sessionId) ?? 0) > now) return;
-      if (this.vulcanFiringStartedAt.has(client.sessionId)) return;
+      const hunter =
+        this.state.players.get(
+          client.sessionId,
+        );
 
-      this.vulcanFiringStartedAt.set(client.sessionId, now);
-      const generation = (this.vulcanFireGeneration.get(client.sessionId) ?? 0) + 1;
-      this.vulcanFireGeneration.set(client.sessionId, generation);
-      this.broadcast('vulcan_firing', {
-        shooterId: client.sessionId,
-        active: true,
-        startedAt: now,
-        heldMs: 0,
-        cooldownMs: 0,
-        readyAt: now,
-        serverNow: now,
-      });
+      if (
+        !hunter ||
+        hunter.role !== 'hunter' ||
+        !hunter.alive
+      ) return;
 
-      const tick = (): void => {
-        if (
-          this.state.phase !== 'hunt' ||
-          !this.vulcanActiveHunters.has(client.sessionId) ||
-          this.vulcanFireGeneration.get(client.sessionId) !== generation
-        ) return;
-        const startedAt = this.vulcanFiringStartedAt.get(client.sessionId);
-        if (!startedAt) return;
-        const tickNow = Date.now();
-        const heldMs = Math.min(this.vulcanDurationMs, tickNow - startedAt);
-        const aim = this.vulcanAimByHunter.get(client.sessionId) ?? { x: 480, y: 270 };
+      const now =
+        Date.now();
 
-        for (const [sessionId, target] of this.state.players) {
-          if (target.role !== 'hider' || !target.alive) continue;
-          const nx = (target.x - aim.x) / this.vulcanHitRadiusX;
-          const ny = (target.y - aim.y) / this.vulcanHitRadiusY;
-          const d2 = nx * nx + ny * ny;
-          if (d2 > 1) continue;
-          const normalized = Math.min(1, Math.sqrt(d2));
-          const perTickChance = 0.095 - normalized * 0.055;
-          if (Math.random() > perTickChance) continue;
-          target.alive = false;
-          if (!this.victoryFoundHiders.some((entry) => entry.sessionId === sessionId)) {
-            this.victoryFoundHiders.push({
-              sessionId,
-              name: String(target.name ?? 'Hider').slice(0,32),
-              x: target.x,
-              y: target.y,
-              foundOrder: this.victoryFoundHiders.length + 1,
-              foundAt: tickNow,
-            });
+      const heat =
+        this.updateVulcanHeat(
+          client.sessionId,
+          now,
+          false,
+        );
+
+      if (
+        heat >= 0.999 ||
+        (this.vulcanCoolingUntil.get(client.sessionId) ?? 0) > now ||
+        this.vulcanFiringStartedAt.has(client.sessionId)
+      ) {
+        return;
+      }
+
+      this.vulcanFiringStartedAt.set(
+        client.sessionId,
+        now,
+      );
+
+      this.vulcanHeatUpdatedAt.set(
+        client.sessionId,
+        now,
+      );
+
+      const generation =
+        (
+          this.vulcanFireGeneration.get(
+            client.sessionId,
+          ) ??
+          0
+        ) +
+        1;
+
+      this.vulcanFireGeneration.set(
+        client.sessionId,
+        generation,
+      );
+
+      this.broadcast(
+        'vulcan_firing',
+        {
+          shooterId:
+            client.sessionId,
+          active:
+            true,
+          startedAt:
+            now,
+          heldMs:
+            0,
+          cooldownMs:
+            0,
+          readyAt:
+            now,
+          serverNow:
+            now,
+        },
+      );
+
+      const tick =
+        (): void => {
+          if (
+            this.state.phase !==
+              'hunt' ||
+            !this.vulcanActiveHunters.has(
+              client.sessionId,
+            ) ||
+            this.vulcanFireGeneration.get(
+              client.sessionId,
+            ) !==
+              generation
+          ) {
+            return;
           }
-        }
 
-        if (this.getAliveHiderCount() === 0) {
-          this.finishGame('hunters');
-          return;
-        }
-        if (heldMs >= this.vulcanDurationMs) {
-          this.stopVulcanHoldFire(client.sessionId, tickNow);
-          return;
-        }
-        this.clock.setTimeout(tick, 90);
-      };
-      this.clock.setTimeout(tick, 90);
+          const startedAt =
+            this.vulcanFiringStartedAt.get(
+              client.sessionId,
+            );
+
+          if (!startedAt) {
+            return;
+          }
+
+          const tickNow =
+            Date.now();
+
+          const heatNow =
+            this.updateVulcanHeat(
+              client.sessionId,
+              tickNow,
+              true,
+            );
+
+          const aim =
+            this.vulcanAimByHunter.get(
+              client.sessionId,
+            ) ??
+            {
+              x: 480,
+              y: 270,
+            };
+
+          for (
+            const [
+              sessionId,
+              target,
+            ] of
+            this.state.players
+          ) {
+            if (
+              target.role !==
+                'hider' ||
+              !target.alive
+            ) {
+              continue;
+            }
+
+            const nx =
+              (
+                target.x -
+                aim.x
+              ) /
+              this.vulcanHitRadiusX;
+
+            const ny =
+              (
+                target.y -
+                aim.y
+              ) /
+              this.vulcanHitRadiusY;
+
+            const d2 =
+              nx *
+                nx +
+              ny *
+                ny;
+
+            if (
+              d2 >
+              1
+            ) {
+              continue;
+            }
+
+            const normalized =
+              Math.min(
+                1,
+                Math.sqrt(
+                  d2,
+                ),
+              );
+
+            const perTickChance =
+              0.095 -
+              normalized *
+                0.055;
+
+            if (
+              Math.random() >
+              perTickChance
+            ) {
+              continue;
+            }
+
+            target.alive =
+              false;
+
+            if (
+              !this.victoryFoundHiders.some(
+                (
+                  entry,
+                ) =>
+                  entry.sessionId ===
+                  sessionId,
+              )
+            ) {
+              this.victoryFoundHiders.push({
+                sessionId,
+                name:
+                  String(
+                    target.name ??
+                      'Hider',
+                  ).slice(
+                    0,
+                    32,
+                  ),
+                x:
+                  target.x,
+                y:
+                  target.y,
+                foundOrder:
+                  this.victoryFoundHiders.length +
+                  1,
+                foundAt:
+                  tickNow,
+              });
+            }
+          }
+
+          if (
+            this.getAliveHiderCount() ===
+            0
+          ) {
+            this.finishGame(
+              'hunters',
+            );
+
+            return;
+          }
+
+          if (
+            heatNow >=
+            0.999
+          ) {
+            this.stopVulcanHoldFire(
+              client.sessionId,
+              tickNow,
+              true,
+            );
+
+            return;
+          }
+
+          this.clock.setTimeout(
+            tick,
+            90,
+          );
+        };
+
+      this.clock.setTimeout(
+        tick,
+        90,
+      );
     },
 
     vulcan_fire_stop: (
       client: Client,
       _message: VulcanFireStopMessage,
     ): void => {
-      this.stopVulcanHoldFire(client.sessionId, Date.now());
+      this.stopVulcanHoldFire(
+        client.sessionId,
+        Date.now(),
+        false,
+      );
     },
 
-    /* Legacy one-click packet is intentionally ignored after v510. */
+    /* Legacy one-click packet remains ignored. */
     vulcan_fire: (
       _client: Client,
       _message: VulcanFireMessage,
     ): void => {},
+
     hunter_aim: (
       client: Client,
       message: HunterAimMessage,
@@ -6005,10 +6350,14 @@ this.sendPaintReadyState(client);
     this.lastSniperAimAt.clear();
     this.lastSniperFireAt.clear();
     this.vulcanActiveHunters.clear();
+    this.vulcanHeatByHunter.clear();
+    this.vulcanHeatUpdatedAt.clear();
     this.vulcanAimByHunter.clear();
     this.vulcanFiringStartedAt.clear();
     this.vulcanCoolingUntil.clear();
     this.vulcanFireGeneration.clear();
+    this.vulcanHeatByHunter.clear();
+    this.vulcanHeatUpdatedAt.clear();
     this.tacticalSupportCommittedHunters.clear();
     this.lastVulcanAimAt.clear();
     this.lastVulcanFireAt.clear();
@@ -6267,10 +6616,14 @@ this.sendPaintReadyState(client);
     this.lastSniperAimAt.clear();
     this.lastSniperFireAt.clear();
     this.vulcanActiveHunters.clear();
+    this.vulcanHeatByHunter.clear();
+    this.vulcanHeatUpdatedAt.clear();
     this.vulcanAimByHunter.clear();
     this.vulcanFiringStartedAt.clear();
     this.vulcanCoolingUntil.clear();
     this.vulcanFireGeneration.clear();
+    this.vulcanHeatByHunter.clear();
+    this.vulcanHeatUpdatedAt.clear();
     this.tacticalSupportCommittedHunters.clear();
     this.lastVulcanAimAt.clear();
     this.lastVulcanFireAt.clear();

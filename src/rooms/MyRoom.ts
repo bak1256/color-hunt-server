@@ -2432,25 +2432,16 @@ const gauge =
               continue;
             }
 
-            const normalized =
-              Math.min(
-                1,
-                Math.sqrt(
-                  d2,
-                ),
-              );
-
-            const perTickChance =
-              0.095 -
-              normalized *
-                0.055;
-
-            if (
-              Math.random() >
-              perTickChance
-            ) {
-              continue;
-            }
+            /*
+             * V1010529B_VULCAN_RELIABLE_AREA_HIT:
+             * The server already authoritatively confirmed that this living
+             * Hider is inside the Vulcan ellipse (d2 <= 1). Do not roll a
+             * second random hit lottery here: that made sustained Vulcan fire
+             * visibly pass over valid targets without registering a hit.
+             *
+             * Keep the existing ellipse/hitbox untouched; only remove the
+             * probabilistic rejection after the authoritative overlap test.
+             */
 
             target.alive =
               false;

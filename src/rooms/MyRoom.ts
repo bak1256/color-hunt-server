@@ -1,3 +1,4 @@
+/* V1010521G_VULCAN_SERVER_HEAT_RESULT_CLEAN_HIDER_OUTLINE_CURRENT_SOURCE: streams authoritative accumulated Vulcan HEAT every firing tick. */
 /* V1010519_VULCAN_CONTINUOUS_HEAT_SPECTATOR_SYNC_DARK_ALIGN: authoritative accumulated Vulcan heat; partial rest cools, only 100% overheat locks for 3s. */
 /* V1010510_VULCAN_HOLD_FIRE_CINEMATIC_SEARCHLIGHT: authoritative Vulcan hold-fire / proportional cooldown. */
 /* V1010508_VULCAN_SEARCHLIGHT_COOLDOWN_CINEMATIC: selected Vulcan persists; 6s authoritative repeat-fire cooldown. */
@@ -630,6 +631,10 @@ export class MyRoom extends Room {
         readyAt,
         serverNow:
           now,
+        heat:
+          isOverheated
+            ? 1
+            : heat,
       },
     );
   }
@@ -2306,6 +2311,7 @@ const gauge =
             now,
           serverNow:
             now,
+          heat,
         },
       );
 
@@ -2343,6 +2349,35 @@ const gauge =
               tickNow,
               true,
             );
+
+          /*
+           * V521 SERVER_HEAT_STREAM:
+           * UI and damage authority share this exact accumulated HEAT.
+           */
+          this.broadcast(
+            'vulcan_firing',
+            {
+              shooterId:
+                client.sessionId,
+              active:
+                true,
+              startedAt,
+              heldMs:
+                Math.max(
+                  0,
+                  tickNow -
+                    startedAt,
+                ),
+              cooldownMs:
+                0,
+              readyAt:
+                tickNow,
+              serverNow:
+                tickNow,
+              heat:
+                heatNow,
+            },
+          );
 
           const aim =
             this.vulcanAimByHunter.get(

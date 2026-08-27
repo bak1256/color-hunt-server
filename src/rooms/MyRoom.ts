@@ -1,3 +1,4 @@
+/* V1010533_MULTI_HUNTER_VICTORY_KILL_ATTRIBUTION: shotgun/sniper/Vulcan found-Hider records carry Hunter sessionId + stable clientKey into victoryShowcase. */
 /* V1010532B_VULCAN_RADIUS15_EXACT_SOURCE: authoritative random Vulcan impact center is radius 15px / diameter 30px around live mouse aim. */
 /* V1010530_VULCAN_CIRCULAR_RANDOM_IMPACT: spotlight ellipse visual-only; damage follows server-random circular impacts. */
 /* V1010526B_VULCAN_1P5X: authoritative tick 45ms->60ms; hitbox untouched. */
@@ -732,6 +733,9 @@ export class MyRoom extends Room {
       y: number;
       foundOrder: number;
       foundAt: number;
+      /* V1010533_MULTI_HUNTER_VICTORY_KILL_ATTRIBUTION: authoritative personal-kill owner. */
+      foundByHunterSessionId: string;
+      foundByHunterClientKey: string;
     }> = [];
 
   messages = {
@@ -2162,6 +2166,11 @@ const gauge =
               y: target.y,
               foundOrder: this.victoryFoundHiders.length + 1,
               foundAt: now,
+              foundByHunterSessionId:
+                client.sessionId,
+              foundByHunterClientKey:
+                this.clientKeyBySessionId.get(client.sessionId) ??
+                client.sessionId,
             });
           }
           target.alive = false;
@@ -2534,6 +2543,11 @@ const gauge =
                   1,
                 foundAt:
                   tickNow,
+                foundByHunterSessionId:
+                  client.sessionId,
+                foundByHunterClientKey:
+                  this.clientKeyBySessionId.get(client.sessionId) ??
+                  client.sessionId,
               });
             }
           }
@@ -2887,6 +2901,11 @@ hunterStats.shotsFired += 1;
                 1,
               foundAt:
                 Date.now(),
+              foundByHunterSessionId:
+                client.sessionId,
+              foundByHunterClientKey:
+                this.clientKeyBySessionId.get(client.sessionId) ??
+                client.sessionId,
             });
           }
 
@@ -6627,6 +6646,10 @@ this.sendPaintReadyState(client);
               entry.foundOrder,
             foundAt:
               entry.foundAt,
+            foundByHunterSessionId:
+              entry.foundByHunterSessionId,
+            foundByHunterClientKey:
+              entry.foundByHunterClientKey,
           }),
         ),
       survivingHiders:

@@ -4668,6 +4668,49 @@ this.sendPaintReadyState(client);
      */
     if (this.state.phase === "lobby") {
       this.broadcastLobbyReadyState();
+
+      /*
+       * V1010552_LOBBY_ROSTER_CONVERGENCE_HOTFIX / JOIN_FULL_ROSTER_CONVERGENCE
+       *
+       * Existing clients normally learn a new Lobby player through Schema onAdd.
+       * If that stream briefly adds/removes out of order, the client can show a
+       * white fallback actor and then lose the player while the newcomer remains
+       * connected. Broadcast one tiny Lobby-only roster snapshot to EVERY live
+       * client so all browsers converge on the authoritative server roster.
+       */
+      this.clients.forEach(
+        (connectedClient) => {
+          this.sendLobbySnapshot(
+            connectedClient,
+          );
+        },
+      );
+
+      /*
+       * One short settle pulse covers the join/Schema ordering window without
+       * reintroducing active-round paint fanout removed by v549.
+       */
+      this.clock.setTimeout(
+        () => {
+          if (
+            this.state.phase !== "lobby" ||
+            !this.state.players.has(
+              client.sessionId,
+            )
+          ) {
+            return;
+          }
+
+          this.clients.forEach(
+            (connectedClient) => {
+              this.sendLobbySnapshot(
+                connectedClient,
+              );
+            },
+          );
+        },
+        180,
+      );
     }
 
     /* V101079_REJOIN_SNAPSHOT_PULSE */
@@ -5576,6 +5619,19 @@ this.sendPaintReadyState(client);
      */
     if (this.state.phase === "lobby") {
       this.broadcastLobbyReadyState();
+
+      /*
+       * V1010552_LOBBY_ROSTER_CONVERGENCE_HOTFIX / RECONNECT_FULL_ROSTER_CONVERGENCE
+       * A recovered Lobby seat is roster topology too. Refresh every live client
+       * once so a browser that missed Schema recovery immediately heals.
+       */
+      this.clients.forEach(
+        (connectedClient) => {
+          this.sendLobbySnapshot(
+            connectedClient,
+          );
+        },
+      );
     }
 
     /* V101078_CANCEL_NO_HUNTER_ON_RECONNECT */

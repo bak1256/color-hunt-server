@@ -1,3 +1,4 @@
+/* V1010549_RECONNECT_PAINT_FANOUT_LOAD_SHED_DIAG: remove reconnect-time full paint fan-out to peers; add server drop/reconnect diagnostics. */
 /* V1010533_MULTI_HUNTER_VICTORY_KILL_ATTRIBUTION: shotgun/sniper/Vulcan found-Hider records carry Hunter sessionId + stable clientKey into victoryShowcase. */
 /* V1010532B_VULCAN_RADIUS15_EXACT_SOURCE: authoritative random Vulcan impact center is radius 15px / diameter 30px around live mouse aim. */
 /* V1010530_VULCAN_CIRCULAR_RANDOM_IMPACT: spotlight ellipse visual-only; damage follows server-random circular impacts. */
@@ -4140,19 +4141,19 @@ this.sendPaintReadyState(client);
                     return;
                   }
 
+                  /* V1010549_RECONNECT_PAINT_FANOUT_LOAD_SHED_DIAG
+                   * Existing clients already receive the remapped reconnecting player's
+                   * paint through the bounded targeted paint_stroke replay below.
+                   * Re-sending the ENTIRE round_paint_state to every socket here caused
+                   * a large reconnect-time fan-out under realistic 200+ stroke/player load.
+                   * Keep only the lightweight authoritative roster snapshot for peers.
+                   * The reconnecting/fresh client still receives one full paint snapshot
+                   * through V101085_REJOIN_FULL_STATE_PULSE.
+                   */
                   this.clients.forEach(
                     (connectedClient) => {
                       this.sendLobbySnapshot(
                         connectedClient,
-                      );
-
-                      connectedClient.send(
-                        "round_paint_state",
-                        {
-                          strokes:
-                            [...this.roundPaintStrokes.values()]
-                              .flat(),
-                        },
                       );
                     },
                   );
@@ -5253,6 +5254,57 @@ this.sendPaintReadyState(client);
      * Give the same session 10 seconds to reconnect. While this is pending,
      * DO NOT delete the player and DO NOT abort the round.
      */
+    const dropDiagPlayer =
+      this.state.players.get(
+        client.sessionId,
+      );
+
+    const dropDiagStrokes =
+      [...this.roundPaintStrokes.values()]
+        .flat();
+
+    console.log(
+      "[NETDIAG SERVER v549][DROP]",
+      {
+        sessionId:
+          client.sessionId,
+        code,
+        phase:
+          this.state.phase,
+        role:
+          dropDiagPlayer?.role ??
+          "unknown",
+        alive:
+          dropDiagPlayer?.alive ??
+          false,
+        liveTotal:
+          this.liveSessionIds.size,
+        liveHunters:
+          this.countLiveRole(
+            "hunter",
+          ),
+        liveHiders:
+          this.countLiveRole(
+            "hider",
+          ),
+        roundStrokeCount:
+          dropDiagStrokes.length,
+        roundPointCount:
+          dropDiagStrokes.reduce(
+            (total, stroke) =>
+              total +
+              (
+                Array.isArray(
+                  stroke?.points,
+                )
+                  ? stroke.points.length
+                  : 0
+              ),
+            0,
+          ),
+      },
+    );
+
     console.log(
       "[Chameleon Hunt] temporary drop",
       {
@@ -5528,6 +5580,31 @@ this.sendPaintReadyState(client);
 
     /* V101078_CANCEL_NO_HUNTER_ON_RECONNECT */
     this.noHunterGraceGeneration += 1;
+
+    console.log(
+      "[NETDIAG SERVER v549][RECONNECT]",
+      {
+        sessionId:
+          client.sessionId,
+        phase:
+          this.state.phase,
+        role:
+          this.state.players.get(
+            client.sessionId,
+          )?.role ??
+          "unknown",
+        liveTotal:
+          this.liveSessionIds.size,
+        liveHunters:
+          this.countLiveRole(
+            "hunter",
+          ),
+        liveHiders:
+          this.countLiveRole(
+            "hider",
+          ),
+      },
+    );
 
     console.log(
       "[Chameleon Hunt] reconnected",

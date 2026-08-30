@@ -1,3 +1,4 @@
+/* V1010555F_CLONE_DANCE_FIXED_OWNER_ASYMMETRIC_FORMATION_SERVER: real Hider stays at exact pre-skill coordinate; only the 10-clone formation center shifts randomly/asymmetrically. */
 /* V1010555E_REPAIR_CLONE_DANCE_RANDOM_OWNER_SERVER: restore pre-v555d source; safe class-member patch avoids Array<{...}> return-type brace corruption. */
 /* V1010555_CLONE_DANCE_PARTY_SERVER: equal-chance Clone Dance Party + safe 10-clone placement + victory hard cancel. */
 /* V1010554H_TRIPLE_TELEPORT_RANDOM_DESTINATIONS: generate three fresh nearby random destinations on every Triple Teleport cast. */
@@ -4236,8 +4237,13 @@ this.sendPaintReadyState(client);
   private startHiderCloneDanceParty(
     client:Client,
   ):void{
-    const id=client.sessionId;
-    const hider=this.state.players.get(id);
+    const id=
+      client.sessionId;
+
+    const hider=
+      this.state.players.get(
+        id,
+      );
 
     if(
       this.state.phase!=="hunt" ||
@@ -4247,74 +4253,384 @@ this.sendPaintReadyState(client);
       this.isHiderHardened(id) ||
       this.tripleTeleportActiveHiders.has(id) ||
       this.cloneDancePartyActiveHiders.has(id)
-    ) return;
-
-    const generation=(this.cloneDancePartyGeneration.get(id) ?? 0)+1;
-    this.cloneDancePartyGeneration.set(id,generation);
-    this.cloneDancePartyActiveHiders.add(id);
-
-    const returnX=hider.x;
-    const returnY=hider.y;
-    this.cloneDancePartyOriginByHider.set(id,{x:returnX,y:returnY});
-
-    const formation=this.generateHiderCloneDancePoints(returnX,returnY);
-    if(formation.length!==11){
-      this.cloneDancePartyActiveHiders.delete(id);
-      this.cloneDancePartyOriginByHider.delete(id);
+    ){
       return;
     }
 
-    /* 1 random member is the REAL Hider; remaining 10 are visual clones. */
-    const ownerIndex=Math.floor(Math.random()*formation.length);
-    const ownerPoint=formation[ownerIndex];
-    const clones=formation.filter((_point,index)=>index!==ownerIndex);
+    const generation=
+      (
+        this.cloneDancePartyGeneration.get(
+          id,
+        ) ??
+        0
+      )+
+      1;
 
-    /* server hit authority follows the visible real dancer */
-    hider.x=ownerPoint.x;
-    hider.y=ownerPoint.y;
+    this.cloneDancePartyGeneration.set(
+      id,
+      generation,
+    );
+    this.cloneDancePartyActiveHiders.add(
+      id,
+    );
 
-    const now=Date.now();
-    const endsAt=now+this.cloneDancePartyDurationMs;
+    /*
+     * ABSOLUTE OWNER ANCHOR:
+     * The real Hider's server position is never changed by this skill.
+     */
+    const ownerX=
+      hider.x;
+    const ownerY=
+      hider.y;
 
-    this.broadcast('hider_clone_dance_party',{
-      sessionId:id,
-      stage:'start',
-      originX:ownerPoint.x,
-      originY:ownerPoint.y,
-      returnX,
-      returnY,
-      clones,
-      durationMs:this.cloneDancePartyDurationMs,
-      endsAt,
-      serverNow:now,
-    });
+    this.cloneDancePartyOriginByHider.set(
+      id,
+      {
+        x:ownerX,
+        y:ownerY,
+      },
+    );
 
-    this.clock.setTimeout(()=>{
-      if(this.cloneDancePartyGeneration.get(id)!==generation) return;
-      const current=this.state.players.get(id);
-      if(this.state.phase!=="hunt" || !current || !current.alive){
-        this.cancelHiderCloneDanceParty(id,generation);
+    /*
+     * Search several RANDOM OFFSET party-centers and keep the candidate whose
+     * clone centroid is farthest from the fixed real Hider.
+     *
+     * Result:
+     * - same real player coordinate
+     * - sometimes real player is far left/right/top/bottom/diagonal
+     * - no "real = center" tell
+     */
+    let bestClones:Array<{
+      x:number;
+      y:number;
+      spawnDelayMs:number;
+      phase:number;
+    }>=[];
+    let bestCentroidDistance=-1;
+
+    const baseAngle=
+      Math.random()*
+      Math.PI*
+      2;
+
+    for(
+      let attempt=0;
+      attempt<14;
+      attempt+=1
+    ){
+      const angle=
+        baseAngle+
+        (
+          attempt-
+          6.5
+        )*
+        0.11+
+        (
+          Math.random()-
+          0.5
+        )*
+        0.20;
+
+      const desiredOffset=
+        105+
+        Math.random()*
+        95;
+
+      /*
+       * This center is only a GENERATION reference; it is not a player.
+       */
+      const centerX=
+        PhaserMathClampServer(
+          ownerX+
+            Math.cos(angle)*
+            desiredOffset,
+          48,
+          912,
+        );
+      const centerY=
+        PhaserMathClampServer(
+          ownerY+
+            Math.sin(angle)*
+            desiredOffset,
+          68,
+          472,
+        );
+
+      /*
+       * Ignore a clamped center that is still effectively the real Hider.
+       */
+      if(
+        Math.hypot(
+          centerX-ownerX,
+          centerY-ownerY,
+        )<
+        62
+      ){
+        continue;
+      }
+
+      const generated=
+        this.generateHiderCloneDancePoints(
+          centerX,
+          centerY,
+        );
+
+      const clones:Array<{
+        x:number;
+        y:number;
+        spawnDelayMs:number;
+        phase:number;
+      }>=[];
+
+      for(
+        const point of
+        generated
+      ){
+        if(
+          clones.length>=10
+        ){
+          break;
+        }
+
+        /*
+         * Never overlap the fixed REAL Hider.
+         */
+        if(
+          Math.hypot(
+            point.x-ownerX,
+            point.y-ownerY,
+          )<
+          52
+        ){
+          continue;
+        }
+
+        /*
+         * Preserve readable separation from already chosen clones.
+         */
+        if(
+          clones.some(
+            (other)=>
+              Math.hypot(
+                other.x-point.x,
+                other.y-point.y,
+              )<
+              42,
+          )
+        ){
+          continue;
+        }
+
+        clones.push(
+          point,
+        );
+      }
+
+      if(
+        clones.length!==
+        10
+      ){
+        continue;
+      }
+
+      const centroidX=
+        clones.reduce(
+          (
+            sum,
+            point,
+          )=>
+            sum+
+            point.x,
+          0,
+        )/
+        clones.length;
+
+      const centroidY=
+        clones.reduce(
+          (
+            sum,
+            point,
+          )=>
+            sum+
+            point.y,
+          0,
+        )/
+        clones.length;
+
+      const centroidDistance=
+        Math.hypot(
+          centroidX-ownerX,
+          centroidY-ownerY,
+        );
+
+      if(
+        centroidDistance>
+        bestCentroidDistance
+      ){
+        bestCentroidDistance=
+          centroidDistance;
+        bestClones=
+          clones;
+      }
+
+      /*
+       * Already very clearly off-center.
+       */
+      if(
+        bestCentroidDistance>=
+        82
+      ){
+        break;
+      }
+    }
+
+    /*
+     * Very defensive fallback: use a random safe generated set but KEEP the
+     * real Hider fixed. The normal path above should almost always win.
+     */
+    if(
+      bestClones.length!==
+      10
+    ){
+      const fallback=
+        this.generateHiderCloneDancePoints(
+          ownerX,
+          ownerY,
+        )
+          .filter(
+            (point)=>
+              Math.hypot(
+                point.x-ownerX,
+                point.y-ownerY,
+              )>=52,
+          )
+          .slice(
+            0,
+            10,
+          );
+
+      if(
+        fallback.length!==
+        10
+      ){
+        this.cloneDancePartyActiveHiders.delete(
+          id,
+        );
+        this.cloneDancePartyOriginByHider.delete(
+          id,
+        );
         return;
       }
 
-      current.x=returnX;
-      current.y=returnY;
-      this.cloneDancePartyActiveHiders.delete(id);
-      this.cloneDancePartyOriginByHider.delete(id);
+      bestClones=
+        fallback;
+    }
 
-      this.broadcast('hider_clone_dance_party',{
-        sessionId:id,
-        stage:'end',
-        originX:ownerPoint.x,
-        originY:ownerPoint.y,
-        returnX,
-        returnY,
-        clones:[],
-        durationMs:0,
-        endsAt:0,
-        serverNow:Date.now(),
-      });
-    },this.cloneDancePartyDurationMs);
+    const now=
+      Date.now();
+
+    this.broadcast(
+      "hider_clone_dance_party",
+      {
+        sessionId:
+          id,
+        stage:
+          "start",
+
+        /*
+         * CLIENT owner anchor = the exact position from BEFORE the skill.
+         */
+        originX:
+          ownerX,
+        originY:
+          ownerY,
+        returnX:
+          ownerX,
+        returnY:
+          ownerY,
+
+        clones:
+          bestClones,
+        durationMs:
+          this.cloneDancePartyDurationMs,
+        endsAt:
+          now+
+          this.cloneDancePartyDurationMs,
+        serverNow:
+          now,
+      },
+    );
+
+    this.clock.setTimeout(
+      ()=>{
+        if(
+          this.cloneDancePartyGeneration.get(
+            id,
+          )!==
+          generation
+        ){
+          return;
+        }
+
+        const current=
+          this.state.players.get(
+            id,
+          );
+
+        if(
+          this.state.phase!=="hunt" ||
+          !current ||
+          !current.alive
+        ){
+          this.cancelHiderCloneDanceParty(
+            id,
+            generation,
+          );
+          return;
+        }
+
+        /*
+         * No teleport-back is needed: server X/Y never moved.
+         */
+        current.x=
+          ownerX;
+        current.y=
+          ownerY;
+
+        this.cloneDancePartyActiveHiders.delete(
+          id,
+        );
+        this.cloneDancePartyOriginByHider.delete(
+          id,
+        );
+
+        this.broadcast(
+          "hider_clone_dance_party",
+          {
+            sessionId:
+              id,
+            stage:
+              "end",
+            originX:
+              ownerX,
+            originY:
+              ownerY,
+            returnX:
+              ownerX,
+            returnY:
+              ownerY,
+            clones:[],
+            durationMs:
+              0,
+            endsAt:
+              0,
+            serverNow:
+              Date.now(),
+          },
+        );
+      },
+      this.cloneDancePartyDurationMs,
+    );
   }
 
   private cancelHiderCloneDanceParty(

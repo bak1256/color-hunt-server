@@ -1,3 +1,4 @@
+/* V1010555E_REPAIR_CLONE_DANCE_RANDOM_OWNER_SERVER: restore pre-v555d source; safe class-member patch avoids Array<{...}> return-type brace corruption. */
 /* V1010555_CLONE_DANCE_PARTY_SERVER: equal-chance Clone Dance Party + safe 10-clone placement + victory hard cancel. */
 /* V1010554H_TRIPLE_TELEPORT_RANDOM_DESTINATIONS: generate three fresh nearby random destinations on every Triple Teleport cast. */
 /* V1010554G_TRIPLE_TELEPORT_REAL_MOTION_SEQUENCE: three authoritative endpoints animated as high-speed moves, separate spin/pop, exact-origin return. */
@@ -428,6 +429,8 @@ export class MyRoom extends Room {
   /* V1010555_CLONE_DANCE_PARTY_SERVER: server owns party availability/lifetime/placement. */
   private readonly cloneDancePartyActiveHiders=new Set<string>();
   private readonly cloneDancePartyGeneration=new Map<string,number>();
+  private readonly cloneDancePartyOriginByHider=
+    new Map<string,{x:number;y:number}>();
   private readonly cloneDancePartyDurationMs=10_000;
 
   /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: support choice is mutually exclusive per hunter/round. */
@@ -4136,7 +4139,7 @@ this.sendPaintReadyState(client);
 
     const fill=(spacing:number):void=>{
       for(const point of candidates){
-        if(selected.length>=10)return;
+        if(selected.length>=11)return;
 
         if(
           selected.every(
@@ -4154,7 +4157,7 @@ this.sendPaintReadyState(client);
 
     fill(preferredSpacing);
 
-    if(selected.length<10){
+    if(selected.length<11){
       fill(46);
     }
 
@@ -4162,7 +4165,7 @@ this.sendPaintReadyState(client);
      * Extremely defensive fallback: map-wide safe lattice sorted by distance
      * from the Hider. It still never leaves the map and never overlaps.
      */
-    if(selected.length<10){
+    if(selected.length<11){
       const fallback:Array<{x:number;y:number}>=[];
 
       for(let y=minY;y<=maxY;y+=62){
@@ -4191,7 +4194,7 @@ this.sendPaintReadyState(client);
       );
 
       for(const point of fallback){
-        if(selected.length>=10)break;
+        if(selected.length>=11)break;
 
         if(
           selected.every(
@@ -4208,7 +4211,7 @@ this.sendPaintReadyState(client);
     }
 
     return selected
-      .slice(0,10)
+      .slice(0,11)
       .map(
         (point,index)=>({
           x:point.x,
@@ -4244,142 +4247,109 @@ this.sendPaintReadyState(client);
       this.isHiderHardened(id) ||
       this.tripleTeleportActiveHiders.has(id) ||
       this.cloneDancePartyActiveHiders.has(id)
-    ){
+    ) return;
+
+    const generation=(this.cloneDancePartyGeneration.get(id) ?? 0)+1;
+    this.cloneDancePartyGeneration.set(id,generation);
+    this.cloneDancePartyActiveHiders.add(id);
+
+    const returnX=hider.x;
+    const returnY=hider.y;
+    this.cloneDancePartyOriginByHider.set(id,{x:returnX,y:returnY});
+
+    const formation=this.generateHiderCloneDancePoints(returnX,returnY);
+    if(formation.length!==11){
+      this.cloneDancePartyActiveHiders.delete(id);
+      this.cloneDancePartyOriginByHider.delete(id);
       return;
     }
 
-    const generation=
-      (
-        this.cloneDancePartyGeneration.get(id) ??
-        0
-      )+
-      1;
+    /* 1 random member is the REAL Hider; remaining 10 are visual clones. */
+    const ownerIndex=Math.floor(Math.random()*formation.length);
+    const ownerPoint=formation[ownerIndex];
+    const clones=formation.filter((_point,index)=>index!==ownerIndex);
 
-    this.cloneDancePartyGeneration.set(
-      id,
-      generation,
-    );
-    this.cloneDancePartyActiveHiders.add(
-      id,
-    );
-
-    const originX=hider.x;
-    const originY=hider.y;
-    const clones=
-      this.generateHiderCloneDancePoints(
-        originX,
-        originY,
-      );
-
-    if(clones.length!==10){
-      /*
-       * Never start a visually broken partial party.
-       */
-      this.cloneDancePartyActiveHiders.delete(
-        id,
-      );
-      return;
-    }
+    /* server hit authority follows the visible real dancer */
+    hider.x=ownerPoint.x;
+    hider.y=ownerPoint.y;
 
     const now=Date.now();
-    const endsAt=
-      now+
-      this.cloneDancePartyDurationMs;
+    const endsAt=now+this.cloneDancePartyDurationMs;
 
-    this.broadcast(
-      "hider_clone_dance_party",
-      {
-        sessionId:id,
-        stage:"start",
-        originX,
-        originY,
-        clones,
-        durationMs:
-          this.cloneDancePartyDurationMs,
-        endsAt,
-        serverNow:now,
-      },
-    );
+    this.broadcast('hider_clone_dance_party',{
+      sessionId:id,
+      stage:'start',
+      originX:ownerPoint.x,
+      originY:ownerPoint.y,
+      returnX,
+      returnY,
+      clones,
+      durationMs:this.cloneDancePartyDurationMs,
+      endsAt,
+      serverNow:now,
+    });
 
     this.clock.setTimeout(()=>{
-      if(
-        this.cloneDancePartyGeneration.get(id)!==
-          generation
-      ){
+      if(this.cloneDancePartyGeneration.get(id)!==generation) return;
+      const current=this.state.players.get(id);
+      if(this.state.phase!=="hunt" || !current || !current.alive){
+        this.cancelHiderCloneDanceParty(id,generation);
         return;
       }
 
-      const current=
-        this.state.players.get(id);
+      current.x=returnX;
+      current.y=returnY;
+      this.cloneDancePartyActiveHiders.delete(id);
+      this.cloneDancePartyOriginByHider.delete(id);
 
-      if(
-        this.state.phase!=="hunt" ||
-        !current ||
-        !current.alive
-      ){
-        this.cancelHiderCloneDanceParty(
-          id,
-          generation,
-        );
-        return;
-      }
-
-      this.cloneDancePartyActiveHiders.delete(
-        id,
-      );
-
-      this.broadcast(
-        "hider_clone_dance_party",
-        {
-          sessionId:id,
-          stage:"end",
-          originX:current.x,
-          originY:current.y,
-          clones:[],
-          durationMs:0,
-          endsAt:0,
-          serverNow:Date.now(),
-        },
-      );
+      this.broadcast('hider_clone_dance_party',{
+        sessionId:id,
+        stage:'end',
+        originX:ownerPoint.x,
+        originY:ownerPoint.y,
+        returnX,
+        returnY,
+        clones:[],
+        durationMs:0,
+        endsAt:0,
+        serverNow:Date.now(),
+      });
     },this.cloneDancePartyDurationMs);
   }
 
   private cancelHiderCloneDanceParty(
     id:string,
-    generation=
-      this.cloneDancePartyGeneration.get(id) ??
-      0,
+    generation=this.cloneDancePartyGeneration.get(id) ?? 0,
   ):void{
-    if(
-      this.cloneDancePartyGeneration.get(id)!==
-      generation
-    ){
-      return;
-    }
+    if(this.cloneDancePartyGeneration.get(id)!==generation) return;
 
-    this.cloneDancePartyGeneration.set(
-      id,
-      generation+1,
-    );
-    this.cloneDancePartyActiveHiders.delete(
-      id,
-    );
+    this.cloneDancePartyGeneration.set(id,generation+1);
+    this.cloneDancePartyActiveHiders.delete(id);
 
     const player=this.state.players.get(id);
+    const origin=this.cloneDancePartyOriginByHider.get(id);
 
-    this.broadcast(
-      "hider_clone_dance_party",
-      {
-        sessionId:id,
-        stage:"cancel",
-        originX:player?.x ?? 0,
-        originY:player?.y ?? 0,
-        clones:[],
-        durationMs:0,
-        endsAt:0,
-        serverNow:Date.now(),
-      },
-    );
+    if(player && origin){
+      player.x=origin.x;
+      player.y=origin.y;
+    }
+
+    const returnX=origin?.x ?? player?.x ?? 0;
+    const returnY=origin?.y ?? player?.y ?? 0;
+    this.cloneDancePartyOriginByHider.delete(id);
+
+    this.broadcast('hider_clone_dance_party',{
+      sessionId:id,
+      stage:'cancel',
+      originX:returnX,
+      originY:returnY,
+      returnX,
+      returnY,
+      clones:[],
+      durationMs:0,
+      endsAt:0,
+      serverNow:Date.now(),
+    });
   }
 
   private isHiderHardened(sessionId: string, now = Date.now()): boolean {
@@ -7672,6 +7642,7 @@ this.sendPaintReadyState(client);
     this.tripleTeleportOriginByHider.clear();
     this.cloneDancePartyActiveHiders.clear();
     this.cloneDancePartyGeneration.clear();
+    this.cloneDancePartyOriginByHider.clear();
     this.fartGaugeByHunter.clear();
     this.fartGaugeUpdatedAt.clear();
     this.poopUntilByHunter.clear();

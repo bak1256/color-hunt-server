@@ -1,3 +1,4 @@
+/* V1010554G_TRIPLE_TELEPORT_REAL_MOTION_SEQUENCE: three authoritative endpoints animated as high-speed moves, separate spin/pop, exact-origin return. */
 /* V1010554F_TRIPLE_TELEPORT_SLOWER_TIMING: Triple Teleport cadence ~1.5x slower: readable 슉. 슉. 슉. -> 휘리릭 뾰옹~ -> origin. */
 /* V1010554B_TRIPLE_TELEPORT_SERVER: authoritative Random Taunt + 3-step teleport + exact-origin terminal restore. */
 /* V1010553_HARDENED_5POSE_HIT_DRAIN_SERVER */
@@ -3704,12 +3705,11 @@ this.sendPaintReadyState(client);
   }
 
   private startHiderTripleTeleport(client: Client): void {
-    if(this.state.phase!=="hunt") return;
-
     const id=client.sessionId;
     const hider=this.state.players.get(id);
 
     if(
+      this.state.phase!=="hunt" ||
       !hider ||
       hider.role!=="hider" ||
       !hider.alive ||
@@ -3750,9 +3750,18 @@ this.sendPaintReadyState(client);
     emit("start",0,originX,originY,originX,originY);
 
     /*
-     * Three quick server-authoritative jumps.
-     * Fixed relative offsets keep the first implementation deterministic
-     * and make visual/network debugging easy.
+     * V1010554G_TRIPLE_TELEPORT_REAL_MOTION_SEQUENCE
+     *
+     * This is no longer "three coordinate teleports".
+     * Server still owns the authoritative endpoints, while clients animate
+     * a fast 205ms movement between them.
+     *
+     * 0ms    camera zoom-out begins
+     * 420ms  high-speed move 1
+     * 850ms  high-speed move 2
+     * 1280ms high-speed move 3
+     * 1580ms spin + pop at final point (NO position change)
+     * 2180ms exact original hiding position restored
      */
     const offsets=[
       {x:92,y:-48},
@@ -3783,21 +3792,62 @@ this.sendPaintReadyState(client);
         const fromX=prevX;
         const fromY=prevY;
 
+        /*
+         * Endpoint is authoritative now. Client visually traverses from -> to.
+         */
         p.x=x;
         p.y=y;
         prevX=x;
         prevY=y;
 
-        emit(index===2?"vanish":"step",index+1,fromX,fromY,x,y);
-      },255+index*360);
+        emit(
+          "step",
+          index+1,
+          fromX,
+          fromY,
+          x,
+          y,
+        );
+      },420+index*430);
     });
 
+    /*
+     * Separate vanish stage AFTER the third movement has visibly completed.
+     * No extra coordinate jump here.
+     */
     this.clock.setTimeout(()=>{
-      if(this.tripleTeleportGeneration.get(id)!==generation) return;
+      if(this.tripleTeleportGeneration.get(id)!==generation)return;
+
+      const p=this.state.players.get(id);
+      if(
+        this.state.phase!=="hunt" ||
+        !p ||
+        !p.alive
+      ){
+        this.cancelHiderTripleTeleport(id,generation);
+        return;
+      }
+
+      emit(
+        "vanish",
+        3,
+        p.x,
+        p.y,
+        p.x,
+        p.y,
+      );
+    },1580);
+
+    this.clock.setTimeout(()=>{
+      if(this.tripleTeleportGeneration.get(id)!==generation)return;
 
       const p=this.state.players.get(id);
 
-      if(this.state.phase!=="hunt"||!p||!p.alive){
+      if(
+        this.state.phase!=="hunt" ||
+        !p ||
+        !p.alive
+      ){
         this.cancelHiderTripleTeleport(id,generation);
         return;
       }
@@ -3805,14 +3855,24 @@ this.sendPaintReadyState(client);
       const fromX=p.x;
       const fromY=p.y;
 
+      /*
+       * Exact server-authoritative return to the ORIGINAL hiding coordinate.
+       */
       p.x=originX;
       p.y=originY;
 
       this.tripleTeleportActiveHiders.delete(id);
       this.tripleTeleportOriginByHider.delete(id);
 
-      emit("return",3,fromX,fromY,originX,originY);
-    },1680);
+      emit(
+        "return",
+        3,
+        fromX,
+        fromY,
+        originX,
+        originY,
+      );
+    },2180);
   }
 
   private cancelHiderTripleTeleport(

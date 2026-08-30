@@ -1,3 +1,4 @@
+/* V1010556_HIDER_LONG_SKILL_CANCEL_SERVER: server-authoritative manual cancel for Hardened + Clone Dance Party. */
 /* V1010555F_CLONE_DANCE_FIXED_OWNER_ASYMMETRIC_FORMATION_SERVER: real Hider stays at exact pre-skill coordinate; only the 10-clone formation center shifts randomly/asymmetrically. */
 /* V1010555E_REPAIR_CLONE_DANCE_RANDOM_OWNER_SERVER: restore pre-v555d source; safe class-member patch avoids Array<{...}> return-type brace corruption. */
 /* V1010555_CLONE_DANCE_PARTY_SERVER: equal-chance Clone Dance Party + safe 10-clone placement + victory hard cancel. */
@@ -2077,6 +2078,46 @@ const gauge =
 
     /* V1010453_SNIPER_SUPPORT_MODE */
     /* V1010554B_TRIPLE_TELEPORT_SERVER: Random Taunt router + test-only Triple Teleport trigger. */
+    /* V1010556_HIDER_LONG_SKILL_CANCEL_SERVER: manual cancel for the two long-running Hider taunts. */
+    hider_long_skill_cancel: (client: Client): void => {
+      const id=client.sessionId;
+      const hider=this.state.players.get(id);
+
+      if(
+        this.state.phase!=="hunt" ||
+        !hider ||
+        hider.role!=="hider" ||
+        !hider.alive
+      ){
+        return;
+      }
+
+      /*
+       * Hardened: make remaining time exactly zero server-side.
+       * The original expiry timer is generation-safe because its stored endsAt
+       * no longer matches after this map entry is removed.
+       */
+      if(this.hardenedHiderEndsAt.has(id)){
+        const pose=this.hardenedHiderPose.get(id) ?? 1;
+        this.hardenedHiderEndsAt.delete(id);
+        this.hardenedHiderPose.delete(id);
+        this.lastHardenedHitFxAt.delete(id);
+
+        this.broadcast("hider_hardened_state",{
+          sessionId:id,
+          active:false,
+          pose,
+          endsAt:0,
+          serverNow:Date.now(),
+        });
+      }
+
+      /* Clone Dance already owns a safe generation-based cancellation path. */
+      if(this.cloneDancePartyActiveHiders.has(id)){
+        this.cancelHiderCloneDanceParty(id);
+      }
+    },
+
     hider_random_taunt: (client: Client): void => {
       const id=client.sessionId;
       const hider=this.state.players.get(id);

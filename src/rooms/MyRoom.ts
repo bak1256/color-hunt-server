@@ -1,3 +1,4 @@
+/* V1010552_HIDER_HARDENED_SERVER: authoritative 15s invulnerability + movement lock + throttled TING. */
 /* V1010549_RECONNECT_PAINT_FANOUT_LOAD_SHED_DIAG: remove reconnect-time full paint fan-out to peers; add server drop/reconnect diagnostics. */
 /* V1010533_MULTI_HUNTER_VICTORY_KILL_ATTRIBUTION: shotgun/sniper/Vulcan found-Hider records carry Hunter sessionId + stable clientKey into victoryShowcase. */
 /* V1010532B_VULCAN_RADIUS15_EXACT_SOURCE: authoritative random Vulcan impact center is radius 15px / diameter 30px around live mouse aim. */
@@ -82,6 +83,8 @@ type HunterAimMessage = {
 type SniperToggleMessage = { active?: boolean };
 type SniperAimMessage = { x?: number; y?: number };
 type SniperFireMessage = { x?: number; y?: number };
+
+type HiderHardenedTauntMessage = Record<string, never>;
 
 /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT */
 type VulcanToggleMessage = { active?: boolean };
@@ -403,6 +406,13 @@ export class MyRoom extends Room {
   /* V1010453E_SNIPER_2S_RELOAD */
   private readonly sniperReloadMs = 2_000;
   private readonly sniperHitRadius = 20;
+
+  /* V1010552_HIDER_RANDOM_TAUNT_HARDENED */
+  private readonly hardenedHiderEndsAt = new Map<string, number>();
+  private readonly hardenedHiderPose = new Map<string, number>();
+  private readonly lastHardenedHitFxAt = new Map<string, number>();
+  private readonly hiderHardenedDurationMs = 15_000;
+  private readonly hiderHardenedHitFxCooldownMs = 200;
 
   /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: support choice is mutually exclusive per hunter/round. */
   private readonly vulcanActiveHunters = new Set<string>();
@@ -1462,11 +1472,9 @@ export class MyRoom extends Room {
         !player.alive ||
         (
           player.role === "hunter" &&
-          (
-            this.sniperActiveHunters.has(client.sessionId) ||
-            this.vulcanActiveHunters.has(client.sessionId)
-          )
-        )
+          (this.sniperActiveHunters.has(client.sessionId) || this.vulcanActiveHunters.has(client.sessionId))
+        ) ||
+        (player.role === "hider" && this.isHiderHardened(client.sessionId))
       ) {
         return;
       }
@@ -2045,6 +2053,20 @@ const gauge =
     },
 
     /* V1010453_SNIPER_SUPPORT_MODE */
+    hider_hardened_taunt: (client: Client, _message: HiderHardenedTauntMessage): void => {
+      if (this.state.phase !== "hunt") return;
+      const hider = this.state.players.get(client.sessionId);
+      if (!hider || hider.role !== "hider" || !hider.alive || this.isHiderHardened(client.sessionId)) return;
+      const now = Date.now(); const endsAt = now + this.hiderHardenedDurationMs; const pose = 1 + Math.floor(Math.random() * 3);
+      this.hardenedHiderEndsAt.set(client.sessionId, endsAt); this.hardenedHiderPose.set(client.sessionId, pose);
+      this.broadcast("hider_hardened_state", { sessionId: client.sessionId, active: true, pose, endsAt, serverNow: now });
+      this.clock.setTimeout(() => {
+        if ((this.hardenedHiderEndsAt.get(client.sessionId) ?? 0) !== endsAt) return;
+        this.hardenedHiderEndsAt.delete(client.sessionId); this.hardenedHiderPose.delete(client.sessionId); this.lastHardenedHitFxAt.delete(client.sessionId);
+        this.broadcast("hider_hardened_state", { sessionId: client.sessionId, active: false, pose, endsAt: 0, serverNow: Date.now() });
+      }, this.hiderHardenedDurationMs);
+    },
+
     sniper_toggle: (
       client: Client,
       message: SniperToggleMessage,
@@ -2155,6 +2177,8 @@ const gauge =
           hitId = sessionId;
         }
       }
+
+      if (hitId && this.isHiderHardened(hitId)) { this.broadcastHardenedHit(hitId, x, y); hitId = ""; }
 
       if (hitId) {
         const target = this.state.players.get(hitId);
@@ -2513,6 +2537,11 @@ const gauge =
               continue;
             }
 
+            if (this.isHiderHardened(sessionId, tickNow)) {
+              this.broadcastHardenedHit(sessionId, impactX, impactY);
+              continue;
+            }
+
             target.alive =
               false;
 
@@ -2785,6 +2814,7 @@ hunterStats.shotsFired += 1;
 
       const hitIds =
         new Set<string>();
+      const hardenedBlockedIds = new Set<string>();
 
       for (
         let index = 0;
@@ -2844,6 +2874,10 @@ hunterStats.shotsFired += 1;
             ) <= 18;
 
           if (hit) {
+            if (this.isHiderHardened(sessionId)) {
+              if (!hardenedBlockedIds.has(sessionId)) { hardenedBlockedIds.add(sessionId); this.broadcastHardenedHit(sessionId, target.x, target.y); }
+              continue;
+            }
             hitIds.add(sessionId);
           }
         }
@@ -3603,6 +3637,20 @@ this.sendPaintReadyState(client);
     );
   }
 
+
+  private isHiderHardened(sessionId: string, now = Date.now()): boolean {
+    const endsAt = this.hardenedHiderEndsAt.get(sessionId) ?? 0;
+    if (endsAt <= now) { if (endsAt > 0) { this.hardenedHiderEndsAt.delete(sessionId); this.hardenedHiderPose.delete(sessionId); this.lastHardenedHitFxAt.delete(sessionId); } return false; }
+    return true;
+  }
+
+  private broadcastHardenedHit(sessionId: string, x: number, y: number): void {
+    const now = Date.now(); const previous = this.lastHardenedHitFxAt.get(sessionId) ?? 0;
+    if (now - previous < this.hiderHardenedHitFxCooldownMs) return;
+    this.lastHardenedHitFxAt.set(sessionId, now);
+    const pose = 1 + Math.floor(Math.random() * 3); this.hardenedHiderPose.set(sessionId, pose);
+    this.broadcast("hider_hardened_hit", { sessionId, x, y, pose, serverNow: now });
+  }
 
   onCreate(
     options: JoinOptions,
@@ -6587,6 +6635,9 @@ this.sendPaintReadyState(client);
 
     /* V1010453_SNIPER_SUPPORT_MODE: each Hunt starts clean. */
     this.sniperActiveHunters.clear();
+    this.hardenedHiderEndsAt.clear();
+    this.hardenedHiderPose.clear();
+    this.lastHardenedHitFxAt.clear();
     this.lastSniperAimAt.clear();
     this.lastSniperFireAt.clear();
     this.vulcanActiveHunters.clear();
@@ -6857,6 +6908,9 @@ this.sendPaintReadyState(client);
     this.state.phase = "lobby";
 
     this.sniperActiveHunters.clear();
+    this.hardenedHiderEndsAt.clear();
+    this.hardenedHiderPose.clear();
+    this.lastHardenedHitFxAt.clear();
     this.lastSniperAimAt.clear();
     this.lastSniperFireAt.clear();
     this.vulcanActiveHunters.clear();

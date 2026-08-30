@@ -1,3 +1,4 @@
+/* V1010553_HARDENED_5POSE_HIT_DRAIN_SERVER */
 /* V1010552_HIDER_HARDENED_SERVER: authoritative 15s invulnerability + movement lock + throttled TING. */
 /* V1010549_RECONNECT_PAINT_FANOUT_LOAD_SHED_DIAG: remove reconnect-time full paint fan-out to peers; add server drop/reconnect diagnostics. */
 /* V1010533_MULTI_HUNTER_VICTORY_KILL_ATTRIBUTION: shotgun/sniper/Vulcan found-Hider records carry Hunter sessionId + stable clientKey into victoryShowcase. */
@@ -2057,7 +2058,7 @@ const gauge =
       if (this.state.phase !== "hunt") return;
       const hider = this.state.players.get(client.sessionId);
       if (!hider || hider.role !== "hider" || !hider.alive || this.isHiderHardened(client.sessionId)) return;
-      const now = Date.now(); const endsAt = now + this.hiderHardenedDurationMs; const pose = 1 + Math.floor(Math.random() * 3);
+      const now = Date.now(); const endsAt = now + this.hiderHardenedDurationMs; const pose = 1 + Math.floor(Math.random() * 5);
       this.hardenedHiderEndsAt.set(client.sessionId, endsAt); this.hardenedHiderPose.set(client.sessionId, pose);
       this.broadcast("hider_hardened_state", { sessionId: client.sessionId, active: true, pose, endsAt, serverNow: now });
       this.clock.setTimeout(() => {
@@ -3645,11 +3646,7 @@ this.sendPaintReadyState(client);
   }
 
   private broadcastHardenedHit(sessionId: string, x: number, y: number): void {
-    const now = Date.now(); const previous = this.lastHardenedHitFxAt.get(sessionId) ?? 0;
-    if (now - previous < this.hiderHardenedHitFxCooldownMs) return;
-    this.lastHardenedHitFxAt.set(sessionId, now);
-    const pose = 1 + Math.floor(Math.random() * 3); this.hardenedHiderPose.set(sessionId, pose);
-    this.broadcast("hider_hardened_hit", { sessionId, x, y, pose, serverNow: now });
+    const now=Date.now(),previous=this.lastHardenedHitFxAt.get(sessionId)??0;if(now-previous<this.hiderHardenedHitFxCooldownMs)return;const current=this.hardenedHiderEndsAt.get(sessionId)??0;if(current<=now)return;this.lastHardenedHitFxAt.set(sessionId,now);const endsAt=Math.max(now,current-1000),pose=1+Math.floor(Math.random()*5);this.hardenedHiderEndsAt.set(sessionId,endsAt);this.hardenedHiderPose.set(sessionId,pose);this.broadcast("hider_hardened_hit",{sessionId,x,y,pose,endsAt,serverNow:now});if(endsAt<=now){this.hardenedHiderEndsAt.delete(sessionId);this.hardenedHiderPose.delete(sessionId);this.lastHardenedHitFxAt.delete(sessionId);this.broadcast("hider_hardened_state",{sessionId,active:false,pose,endsAt:0,serverNow:now});return;}this.clock.setTimeout(()=>{if((this.hardenedHiderEndsAt.get(sessionId)??0)!==endsAt)return;this.hardenedHiderEndsAt.delete(sessionId);this.hardenedHiderPose.delete(sessionId);this.lastHardenedHitFxAt.delete(sessionId);this.broadcast("hider_hardened_state",{sessionId,active:false,pose,endsAt:0,serverNow:Date.now()});},Math.max(1,endsAt-now));
   }
 
   onCreate(

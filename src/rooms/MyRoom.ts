@@ -1,3 +1,4 @@
+/* V1010554F_TRIPLE_TELEPORT_SLOWER_TIMING: Triple Teleport cadence ~1.5x slower: readable 슉. 슉. 슉. -> 휘리릭 뾰옹~ -> origin. */
 /* V1010554B_TRIPLE_TELEPORT_SERVER: authoritative Random Taunt + 3-step teleport + exact-origin terminal restore. */
 /* V1010553_HARDENED_5POSE_HIT_DRAIN_SERVER */
 /* V1010552_HIDER_HARDENED_SERVER: authoritative 15s invulnerability + movement lock + throttled TING. */
@@ -3788,7 +3789,7 @@ this.sendPaintReadyState(client);
         prevY=y;
 
         emit(index===2?"vanish":"step",index+1,fromX,fromY,x,y);
-      },170+index*240);
+      },255+index*360);
     });
 
     this.clock.setTimeout(()=>{
@@ -3811,7 +3812,7 @@ this.sendPaintReadyState(client);
       this.tripleTeleportOriginByHider.delete(id);
 
       emit("return",3,fromX,fromY,originX,originY);
-    },1120);
+    },1680);
   }
 
   private cancelHiderTripleTeleport(

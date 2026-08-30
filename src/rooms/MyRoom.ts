@@ -1,3 +1,4 @@
+/* V1010555_CLONE_DANCE_PARTY_SERVER: equal-chance Clone Dance Party + safe 10-clone placement + victory hard cancel. */
 /* V1010554H_TRIPLE_TELEPORT_RANDOM_DESTINATIONS: generate three fresh nearby random destinations on every Triple Teleport cast. */
 /* V1010554G_TRIPLE_TELEPORT_REAL_MOTION_SEQUENCE: three authoritative endpoints animated as high-speed moves, separate spin/pop, exact-origin return. */
 /* V1010554F_TRIPLE_TELEPORT_SLOWER_TIMING: Triple Teleport cadence ~1.5x slower: readable 슉. 슉. 슉. -> 휘리릭 뾰옹~ -> origin. */
@@ -423,6 +424,11 @@ export class MyRoom extends Room {
   private readonly tripleTeleportActiveHiders = new Set<string>();
   private readonly tripleTeleportGeneration = new Map<string, number>();
   private readonly tripleTeleportOriginByHider = new Map<string, { x: number; y: number }>();
+
+  /* V1010555_CLONE_DANCE_PARTY_SERVER: server owns party availability/lifetime/placement. */
+  private readonly cloneDancePartyActiveHiders=new Set<string>();
+  private readonly cloneDancePartyGeneration=new Map<string,number>();
+  private readonly cloneDancePartyDurationMs=10_000;
 
   /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: support choice is mutually exclusive per hunter/round. */
   private readonly vulcanActiveHunters = new Set<string>();
@@ -1484,7 +1490,10 @@ export class MyRoom extends Room {
           player.role === "hunter" &&
           (this.sniperActiveHunters.has(client.sessionId) || this.vulcanActiveHunters.has(client.sessionId))
         ) ||
-        (player.role === "hider" && (this.isHiderHardened(client.sessionId) || this.tripleTeleportActiveHiders.has(client.sessionId)))
+        (player.role === "hider" && (this.isHiderHardened(client.sessionId) || (
+        this.tripleTeleportActiveHiders.has(client.sessionId) ||
+        this.cloneDancePartyActiveHiders.has(client.sessionId)
+      )))
       ) {
         return;
       }
@@ -2065,25 +2074,38 @@ const gauge =
     /* V1010453_SNIPER_SUPPORT_MODE */
     /* V1010554B_TRIPLE_TELEPORT_SERVER: Random Taunt router + test-only Triple Teleport trigger. */
     hider_random_taunt: (client: Client): void => {
-      const hider=this.state.players.get(client.sessionId);
+      const id=client.sessionId;
+      const hider=this.state.players.get(id);
+
       if(
         this.state.phase!=="hunt" ||
         !hider ||
         hider.role!=="hider" ||
         !hider.alive ||
-        this.isHiderHardened(client.sessionId) ||
-        this.tripleTeleportActiveHiders.has(client.sessionId)
+        this.isHiderHardened(id) ||
+        this.tripleTeleportActiveHiders.has(id) ||
+        this.cloneDancePartyActiveHiders.has(id)
       ) return;
 
-      if(Math.random()<0.5){
+      /*
+       * Three production Random-Taunt skills currently implemented:
+       * 0 = Hardened
+       * 1 = Triple Teleport
+       * 2 = Clone Dance Party
+       */
+      const choice=Math.floor(Math.random()*3);
+
+      if(choice===0){
         this.handleHiderHardenedTaunt(client);
-      }else{
+      }else if(choice===1){
         this.startHiderTripleTeleport(client);
+      }else{
+        this.startHiderCloneDanceParty(client);
       }
     },
 
-    hider_triple_teleport_test: (client: Client): void => {
-      this.startHiderTripleTeleport(client);
+    hider_clone_dance_test: (client: Client): void => {
+      this.startHiderCloneDanceParty(client);
     },
 
     hider_hardened_taunt: (client: Client, _message: HiderHardenedTauntMessage): void => {
@@ -3670,7 +3692,8 @@ this.sendPaintReadyState(client);
       hider.role!=="hider" ||
       !hider.alive ||
       this.isHiderHardened(client.sessionId) ||
-      this.tripleTeleportActiveHiders.has(client.sessionId)
+      this.tripleTeleportActiveHiders.has(client.sessionId) ||
+      this.cloneDancePartyActiveHiders.has(client.sessionId)
     ) return;
 
     const now=Date.now();
@@ -3715,7 +3738,8 @@ this.sendPaintReadyState(client);
       hider.role!=="hider" ||
       !hider.alive ||
       this.isHiderHardened(id) ||
-      this.tripleTeleportActiveHiders.has(id)
+      this.tripleTeleportActiveHiders.has(id) ||
+      this.cloneDancePartyActiveHiders.has(id)
     ) return;
 
     const originX=hider.x;
@@ -3995,6 +4019,367 @@ this.sendPaintReadyState(client);
       originY:y,
       serverNow:Date.now(),
     });
+  }
+
+  private generateHiderCloneDancePoints(
+    originX:number,
+    originY:number,
+  ):Array<{
+    x:number;
+    y:number;
+    spawnDelayMs:number;
+    phase:number;
+  }>{
+    /*
+     * Full 80x120 Hider silhouette must stay inside 960x540.
+     * Slight extra padding prevents clipping at map edges/corners.
+     */
+    const minX=48;
+    const maxX=912;
+    const minY=68;
+    const maxY=472;
+    const preferredSpacing=54;
+
+    const candidates:Array<{x:number;y:number}>=[];
+    const rotation=Math.random()*Math.PI*2;
+
+    /*
+     * Dense ring candidates work even when origin is in a corner: clamping
+     * folds out-of-map directions inward, then de-duplication/spacing chooses
+     * a clean ten-character formation.
+     */
+    const radii=[72,104,138,176,212];
+
+    radii.forEach((radius,ringIndex)=>{
+      const countOnRing=18+ringIndex*4;
+
+      for(let i=0;i<countOnRing;i+=1){
+        const angle=
+          rotation+
+          (
+            i/
+            countOnRing
+          )*
+          Math.PI*
+          2+
+          (
+            Math.random()-0.5
+          )*
+          0.12;
+
+        const x=
+          PhaserMathClampServer(
+            originX+
+              Math.cos(angle)*
+              (
+                radius+
+                (
+                  Math.random()-0.5
+                )*
+                18
+              ),
+            minX,
+            maxX,
+          );
+
+        const y=
+          PhaserMathClampServer(
+            originY+
+              Math.sin(angle)*
+              (
+                radius+
+                (
+                  Math.random()-0.5
+                )*
+                18
+              ),
+            minY,
+            maxY,
+          );
+
+        if(
+          Math.hypot(
+            x-originX,
+            y-originY,
+          )<44
+        ){
+          continue;
+        }
+
+        if(
+          candidates.some(
+            (point)=>
+              Math.hypot(
+                point.x-x,
+                point.y-y,
+              )<8,
+          )
+        ){
+          continue;
+        }
+
+        candidates.push({x,y});
+      }
+    });
+
+    /*
+     * Fresh shuffle every cast = formation itself is random too.
+     */
+    for(let i=candidates.length-1;i>0;i-=1){
+      const j=Math.floor(Math.random()*(i+1));
+      const temp=candidates[i];
+      candidates[i]=candidates[j];
+      candidates[j]=temp;
+    }
+
+    const selected:Array<{x:number;y:number}>=[];
+
+    const fill=(spacing:number):void=>{
+      for(const point of candidates){
+        if(selected.length>=10)return;
+
+        if(
+          selected.every(
+            (other)=>
+              Math.hypot(
+                other.x-point.x,
+                other.y-point.y,
+              )>=spacing,
+          )
+        ){
+          selected.push(point);
+        }
+      }
+    };
+
+    fill(preferredSpacing);
+
+    if(selected.length<10){
+      fill(46);
+    }
+
+    /*
+     * Extremely defensive fallback: map-wide safe lattice sorted by distance
+     * from the Hider. It still never leaves the map and never overlaps.
+     */
+    if(selected.length<10){
+      const fallback:Array<{x:number;y:number}>=[];
+
+      for(let y=minY;y<=maxY;y+=62){
+        for(let x=minX;x<=maxX;x+=62){
+          if(
+            Math.hypot(
+              x-originX,
+              y-originY,
+            )<44
+          ) continue;
+
+          fallback.push({x,y});
+        }
+      }
+
+      fallback.sort(
+        (a,b)=>
+          Math.hypot(
+            a.x-originX,
+            a.y-originY,
+          )-
+          Math.hypot(
+            b.x-originX,
+            b.y-originY,
+          ),
+      );
+
+      for(const point of fallback){
+        if(selected.length>=10)break;
+
+        if(
+          selected.every(
+            (other)=>
+              Math.hypot(
+                other.x-point.x,
+                other.y-point.y,
+              )>=46,
+          )
+        ){
+          selected.push(point);
+        }
+      }
+    }
+
+    return selected
+      .slice(0,10)
+      .map(
+        (point,index)=>({
+          x:point.x,
+          y:point.y,
+          /*
+           * Random smoke appearance over the first ~0.7 sec.
+           */
+          spawnDelayMs:
+            60+
+            Math.floor(
+              Math.random()*640
+            ),
+          phase:
+            Math.random()*
+            Math.PI*
+            2+
+            index*0.17,
+        }),
+      );
+  }
+
+  private startHiderCloneDanceParty(
+    client:Client,
+  ):void{
+    const id=client.sessionId;
+    const hider=this.state.players.get(id);
+
+    if(
+      this.state.phase!=="hunt" ||
+      !hider ||
+      hider.role!=="hider" ||
+      !hider.alive ||
+      this.isHiderHardened(id) ||
+      this.tripleTeleportActiveHiders.has(id) ||
+      this.cloneDancePartyActiveHiders.has(id)
+    ){
+      return;
+    }
+
+    const generation=
+      (
+        this.cloneDancePartyGeneration.get(id) ??
+        0
+      )+
+      1;
+
+    this.cloneDancePartyGeneration.set(
+      id,
+      generation,
+    );
+    this.cloneDancePartyActiveHiders.add(
+      id,
+    );
+
+    const originX=hider.x;
+    const originY=hider.y;
+    const clones=
+      this.generateHiderCloneDancePoints(
+        originX,
+        originY,
+      );
+
+    if(clones.length!==10){
+      /*
+       * Never start a visually broken partial party.
+       */
+      this.cloneDancePartyActiveHiders.delete(
+        id,
+      );
+      return;
+    }
+
+    const now=Date.now();
+    const endsAt=
+      now+
+      this.cloneDancePartyDurationMs;
+
+    this.broadcast(
+      "hider_clone_dance_party",
+      {
+        sessionId:id,
+        stage:"start",
+        originX,
+        originY,
+        clones,
+        durationMs:
+          this.cloneDancePartyDurationMs,
+        endsAt,
+        serverNow:now,
+      },
+    );
+
+    this.clock.setTimeout(()=>{
+      if(
+        this.cloneDancePartyGeneration.get(id)!==
+          generation
+      ){
+        return;
+      }
+
+      const current=
+        this.state.players.get(id);
+
+      if(
+        this.state.phase!=="hunt" ||
+        !current ||
+        !current.alive
+      ){
+        this.cancelHiderCloneDanceParty(
+          id,
+          generation,
+        );
+        return;
+      }
+
+      this.cloneDancePartyActiveHiders.delete(
+        id,
+      );
+
+      this.broadcast(
+        "hider_clone_dance_party",
+        {
+          sessionId:id,
+          stage:"end",
+          originX:current.x,
+          originY:current.y,
+          clones:[],
+          durationMs:0,
+          endsAt:0,
+          serverNow:Date.now(),
+        },
+      );
+    },this.cloneDancePartyDurationMs);
+  }
+
+  private cancelHiderCloneDanceParty(
+    id:string,
+    generation=
+      this.cloneDancePartyGeneration.get(id) ??
+      0,
+  ):void{
+    if(
+      this.cloneDancePartyGeneration.get(id)!==
+      generation
+    ){
+      return;
+    }
+
+    this.cloneDancePartyGeneration.set(
+      id,
+      generation+1,
+    );
+    this.cloneDancePartyActiveHiders.delete(
+      id,
+    );
+
+    const player=this.state.players.get(id);
+
+    this.broadcast(
+      "hider_clone_dance_party",
+      {
+        sessionId:id,
+        stage:"cancel",
+        originX:player?.x ?? 0,
+        originY:player?.y ?? 0,
+        clones:[],
+        durationMs:0,
+        endsAt:0,
+        serverNow:Date.now(),
+      },
+    );
   }
 
   private isHiderHardened(sessionId: string, now = Date.now()): boolean {
@@ -7157,6 +7542,23 @@ this.sendPaintReadyState(client);
     }
     this.tripleTeleportActiveHiders.clear();
 
+    /*
+     * V1010555_CLONE_DANCE_PARTY_SERVER / RESULT_HARD_BARRIER:
+     * broadcast cancel before round_result so every client removes clones,
+     * notes, smoke and disco immediately on victory judgement.
+     */
+    for(
+      const id of
+      [...this.cloneDancePartyActiveHiders]
+    ){
+      this.cancelHiderCloneDanceParty(
+        id,
+        this.cloneDancePartyGeneration.get(id) ??
+          0,
+      );
+    }
+    this.cloneDancePartyActiveHiders.clear();
+
 
     this.state.phaseEndsAt =
       Date.now() +
@@ -7268,6 +7670,8 @@ this.sendPaintReadyState(client);
     this.tripleTeleportActiveHiders.clear();
     this.tripleTeleportGeneration.clear();
     this.tripleTeleportOriginByHider.clear();
+    this.cloneDancePartyActiveHiders.clear();
+    this.cloneDancePartyGeneration.clear();
     this.fartGaugeByHunter.clear();
     this.fartGaugeUpdatedAt.clear();
     this.poopUntilByHunter.clear();

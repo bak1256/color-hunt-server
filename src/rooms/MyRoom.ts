@@ -1,3 +1,4 @@
+/* V1010554B_TRIPLE_TELEPORT_SERVER: authoritative Random Taunt + 3-step teleport + exact-origin terminal restore. */
 /* V1010553_HARDENED_5POSE_HIT_DRAIN_SERVER */
 /* V1010552_HIDER_HARDENED_SERVER: authoritative 15s invulnerability + movement lock + throttled TING. */
 /* V1010549_RECONNECT_PAINT_FANOUT_LOAD_SHED_DIAG: remove reconnect-time full paint fan-out to peers; add server drop/reconnect diagnostics. */
@@ -414,6 +415,11 @@ export class MyRoom extends Room {
   private readonly lastHardenedHitFxAt = new Map<string, number>();
   private readonly hiderHardenedDurationMs = 15_000;
   private readonly hiderHardenedHitFxCooldownMs = 200;
+
+  /* V1010554B_TRIPLE_TELEPORT_SERVER: authoritative Hider Triple Teleport state. */
+  private readonly tripleTeleportActiveHiders = new Set<string>();
+  private readonly tripleTeleportGeneration = new Map<string, number>();
+  private readonly tripleTeleportOriginByHider = new Map<string, { x: number; y: number }>();
 
   /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: support choice is mutually exclusive per hunter/round. */
   private readonly vulcanActiveHunters = new Set<string>();
@@ -1475,7 +1481,7 @@ export class MyRoom extends Room {
           player.role === "hunter" &&
           (this.sniperActiveHunters.has(client.sessionId) || this.vulcanActiveHunters.has(client.sessionId))
         ) ||
-        (player.role === "hider" && this.isHiderHardened(client.sessionId))
+        (player.role === "hider" && (this.isHiderHardened(client.sessionId) || this.tripleTeleportActiveHiders.has(client.sessionId)))
       ) {
         return;
       }
@@ -2054,18 +2060,31 @@ const gauge =
     },
 
     /* V1010453_SNIPER_SUPPORT_MODE */
+    /* V1010554B_TRIPLE_TELEPORT_SERVER: Random Taunt router + test-only Triple Teleport trigger. */
+    hider_random_taunt: (client: Client): void => {
+      const hider=this.state.players.get(client.sessionId);
+      if(
+        this.state.phase!=="hunt" ||
+        !hider ||
+        hider.role!=="hider" ||
+        !hider.alive ||
+        this.isHiderHardened(client.sessionId) ||
+        this.tripleTeleportActiveHiders.has(client.sessionId)
+      ) return;
+
+      if(Math.random()<0.5){
+        this.handleHiderHardenedTaunt(client);
+      }else{
+        this.startHiderTripleTeleport(client);
+      }
+    },
+
+    hider_triple_teleport_test: (client: Client): void => {
+      this.startHiderTripleTeleport(client);
+    },
+
     hider_hardened_taunt: (client: Client, _message: HiderHardenedTauntMessage): void => {
-      if (this.state.phase !== "hunt") return;
-      const hider = this.state.players.get(client.sessionId);
-      if (!hider || hider.role !== "hider" || !hider.alive || this.isHiderHardened(client.sessionId)) return;
-      const now = Date.now(); const endsAt = now + this.hiderHardenedDurationMs; const pose = 1 + Math.floor(Math.random() * 5);
-      this.hardenedHiderEndsAt.set(client.sessionId, endsAt); this.hardenedHiderPose.set(client.sessionId, pose);
-      this.broadcast("hider_hardened_state", { sessionId: client.sessionId, active: true, pose, endsAt, serverNow: now });
-      this.clock.setTimeout(() => {
-        if ((this.hardenedHiderEndsAt.get(client.sessionId) ?? 0) !== endsAt) return;
-        this.hardenedHiderEndsAt.delete(client.sessionId); this.hardenedHiderPose.delete(client.sessionId); this.lastHardenedHitFxAt.delete(client.sessionId);
-        this.broadcast("hider_hardened_state", { sessionId: client.sessionId, active: false, pose, endsAt: 0, serverNow: Date.now() });
-      }, this.hiderHardenedDurationMs);
+      this.handleHiderHardenedTaunt(client);
     },
 
     sniper_toggle: (
@@ -3638,6 +3657,199 @@ this.sendPaintReadyState(client);
     );
   }
 
+
+  private handleHiderHardenedTaunt(client: Client): void {
+    if(this.state.phase!=="hunt") return;
+
+    const hider=this.state.players.get(client.sessionId);
+    if(
+      !hider ||
+      hider.role!=="hider" ||
+      !hider.alive ||
+      this.isHiderHardened(client.sessionId) ||
+      this.tripleTeleportActiveHiders.has(client.sessionId)
+    ) return;
+
+    const now=Date.now();
+    const endsAt=now+this.hiderHardenedDurationMs;
+    const pose=1+Math.floor(Math.random()*5);
+
+    this.hardenedHiderEndsAt.set(client.sessionId,endsAt);
+    this.hardenedHiderPose.set(client.sessionId,pose);
+
+    this.broadcast("hider_hardened_state",{
+      sessionId:client.sessionId,
+      active:true,
+      pose,
+      endsAt,
+      serverNow:now
+    });
+
+    this.clock.setTimeout(()=>{
+      if((this.hardenedHiderEndsAt.get(client.sessionId)??0)!==endsAt) return;
+
+      this.hardenedHiderEndsAt.delete(client.sessionId);
+      this.hardenedHiderPose.delete(client.sessionId);
+      this.lastHardenedHitFxAt.delete(client.sessionId);
+
+      this.broadcast("hider_hardened_state",{
+        sessionId:client.sessionId,
+        active:false,
+        pose,
+        endsAt:0,
+        serverNow:Date.now()
+      });
+    },this.hiderHardenedDurationMs);
+  }
+
+  private startHiderTripleTeleport(client: Client): void {
+    if(this.state.phase!=="hunt") return;
+
+    const id=client.sessionId;
+    const hider=this.state.players.get(id);
+
+    if(
+      !hider ||
+      hider.role!=="hider" ||
+      !hider.alive ||
+      this.isHiderHardened(id) ||
+      this.tripleTeleportActiveHiders.has(id)
+    ) return;
+
+    const originX=hider.x;
+    const originY=hider.y;
+    const generation=(this.tripleTeleportGeneration.get(id)??0)+1;
+
+    this.tripleTeleportGeneration.set(id,generation);
+    this.tripleTeleportActiveHiders.add(id);
+    this.tripleTeleportOriginByHider.set(id,{x:originX,y:originY});
+
+    const emit=(
+      stage:string,
+      step:number,
+      fromX:number,
+      fromY:number,
+      x:number,
+      y:number,
+    ):void=>{
+      this.broadcast("hider_triple_teleport",{
+        sessionId:id,
+        stage,
+        step,
+        fromX,
+        fromY,
+        x,
+        y,
+        originX,
+        originY,
+        serverNow:Date.now(),
+      });
+    };
+
+    emit("start",0,originX,originY,originX,originY);
+
+    /*
+     * Three quick server-authoritative jumps.
+     * Fixed relative offsets keep the first implementation deterministic
+     * and make visual/network debugging easy.
+     */
+    const offsets=[
+      {x:92,y:-48},
+      {x:-78,y:62},
+      {x:108,y:44},
+    ];
+
+    let prevX=originX;
+    let prevY=originY;
+
+    offsets.forEach((offset,index)=>{
+      this.clock.setTimeout(()=>{
+        const p=this.state.players.get(id);
+
+        if(
+          this.tripleTeleportGeneration.get(id)!==generation ||
+          this.state.phase!=="hunt" ||
+          !p ||
+          !p.alive
+        ){
+          this.cancelHiderTripleTeleport(id,generation);
+          return;
+        }
+
+        const x=PhaserMathClampServer(originX+offset.x,28,932);
+        const y=PhaserMathClampServer(originY+offset.y,38,502);
+
+        const fromX=prevX;
+        const fromY=prevY;
+
+        p.x=x;
+        p.y=y;
+        prevX=x;
+        prevY=y;
+
+        emit(index===2?"vanish":"step",index+1,fromX,fromY,x,y);
+      },170+index*240);
+    });
+
+    this.clock.setTimeout(()=>{
+      if(this.tripleTeleportGeneration.get(id)!==generation) return;
+
+      const p=this.state.players.get(id);
+
+      if(this.state.phase!=="hunt"||!p||!p.alive){
+        this.cancelHiderTripleTeleport(id,generation);
+        return;
+      }
+
+      const fromX=p.x;
+      const fromY=p.y;
+
+      p.x=originX;
+      p.y=originY;
+
+      this.tripleTeleportActiveHiders.delete(id);
+      this.tripleTeleportOriginByHider.delete(id);
+
+      emit("return",3,fromX,fromY,originX,originY);
+    },1120);
+  }
+
+  private cancelHiderTripleTeleport(
+    id:string,
+    generation=this.tripleTeleportGeneration.get(id)??0,
+  ):void{
+    if(this.tripleTeleportGeneration.get(id)!==generation) return;
+
+    const origin=this.tripleTeleportOriginByHider.get(id);
+    const p=this.state.players.get(id);
+
+    const fromX=p?.x??origin?.x??0;
+    const fromY=p?.y??origin?.y??0;
+    const x=origin?.x??fromX;
+    const y=origin?.y??fromY;
+
+    this.tripleTeleportGeneration.set(id,generation+1);
+    this.tripleTeleportActiveHiders.delete(id);
+    this.tripleTeleportOriginByHider.delete(id);
+
+    if(p&&origin){
+      p.x=origin.x;
+      p.y=origin.y;
+    }
+
+    this.broadcast("hider_triple_teleport",{
+      sessionId:id,
+      stage:"cancel",
+      step:0,
+      fromX,
+      fromY,
+      x,
+      y,
+      originX:x,
+      originY:y,
+      serverNow:Date.now(),
+    });
+  }
 
   private isHiderHardened(sessionId: string, now = Date.now()): boolean {
     const endsAt = this.hardenedHiderEndsAt.get(sessionId) ?? 0;
@@ -6790,6 +7002,15 @@ this.sendPaintReadyState(client);
 
     this.sniperActiveHunters.clear();
 
+    /* V1010554B_TRIPLE_TELEPORT_SERVER: victory/result owns the frame immediately. */
+    for(const id of [...this.tripleTeleportActiveHiders]){
+      this.cancelHiderTripleTeleport(
+        id,
+        this.tripleTeleportGeneration.get(id)??0,
+      );
+    }
+    this.tripleTeleportActiveHiders.clear();
+
 
     this.state.phaseEndsAt =
       Date.now() +
@@ -6898,6 +7119,9 @@ this.sendPaintReadyState(client);
     /*
      * V1010254_RESET_FART_EACH_ROUND: defensive round-end cleanup.
      */
+    this.tripleTeleportActiveHiders.clear();
+    this.tripleTeleportGeneration.clear();
+    this.tripleTeleportOriginByHider.clear();
     this.fartGaugeByHunter.clear();
     this.fartGaugeUpdatedAt.clear();
     this.poopUntilByHunter.clear();

@@ -1,3 +1,4 @@
+/* V1010554H_TRIPLE_TELEPORT_RANDOM_DESTINATIONS: generate three fresh nearby random destinations on every Triple Teleport cast. */
 /* V1010554G_TRIPLE_TELEPORT_REAL_MOTION_SEQUENCE: three authoritative endpoints animated as high-speed moves, separate spin/pop, exact-origin return. */
 /* V1010554F_TRIPLE_TELEPORT_SLOWER_TIMING: Triple Teleport cadence ~1.5x slower: readable 슉. 슉. 슉. -> 휘리릭 뾰옹~ -> origin. */
 /* V1010554B_TRIPLE_TELEPORT_SERVER: authoritative Random Taunt + 3-step teleport + exact-origin terminal restore. */
@@ -3763,16 +3764,97 @@ this.sendPaintReadyState(client);
      * 1580ms spin + pop at final point (NO position change)
      * 2180ms exact original hiding position restored
      */
-    const offsets=[
-      {x:92,y:-48},
-      {x:-78,y:62},
-      {x:108,y:44},
-    ];
+    /*
+     * V1010554H_TRIPLE_TELEPORT_RANDOM_DESTINATIONS
+     * Generate a fresh three-point route EVERY CAST.
+     *
+     * Keep the points near the original hiding spot so the local Hider only
+     * needs a small zoom-out, while still guaranteeing visibly different
+     * directions/positions between casts.
+     */
+    const randomTargets:Array<{x:number;y:number}>=[];
+    let previousX=originX;
+    let previousY=originY;
+
+    for(let step=0;step<3;step+=1){
+      let chosenX=originX;
+      let chosenY=originY;
+      let bestDistance=-1;
+
+      for(let attempt=0;attempt<16;attempt+=1){
+        const angle=
+          Math.random()*
+          Math.PI*
+          2;
+        const distance=
+          78+
+          Math.random()*
+          58;
+
+        const candidateX=
+          PhaserMathClampServer(
+            originX+
+              Math.cos(angle)*
+              distance,
+            28,
+            932,
+          );
+        const candidateY=
+          PhaserMathClampServer(
+            originY+
+              Math.sin(angle)*
+              distance,
+            38,
+            502,
+          );
+
+        const fromPrevious=
+          Math.hypot(
+            candidateX-previousX,
+            candidateY-previousY,
+          );
+        const fromOrigin=
+          Math.hypot(
+            candidateX-originX,
+            candidateY-originY,
+          );
+
+        const score=
+          Math.min(
+            fromPrevious,
+            fromOrigin+28,
+          );
+
+        if(score>bestDistance){
+          chosenX=candidateX;
+          chosenY=candidateY;
+          bestDistance=score;
+        }
+
+        /*
+         * Good enough: clearly separated from previous point and not just a
+         * tiny wobble around the origin.
+         */
+        if(
+          fromPrevious>=72 &&
+          fromOrigin>=62
+        ){
+          break;
+        }
+      }
+
+      randomTargets.push({
+        x:chosenX,
+        y:chosenY,
+      });
+      previousX=chosenX;
+      previousY=chosenY;
+    }
 
     let prevX=originX;
     let prevY=originY;
 
-    offsets.forEach((offset,index)=>{
+    randomTargets.forEach((_target,index)=>{
       this.clock.setTimeout(()=>{
         const p=this.state.players.get(id);
 
@@ -3786,8 +3868,11 @@ this.sendPaintReadyState(client);
           return;
         }
 
-        const x=PhaserMathClampServer(originX+offset.x,28,932);
-        const y=PhaserMathClampServer(originY+offset.y,38,502);
+        const target=
+          randomTargets[index];
+
+        const x=target.x;
+        const y=target.y;
 
         const fromX=prevX;
         const fromY=prevY;

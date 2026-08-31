@@ -157,6 +157,7 @@ type RoundEndReason =
 
 /* V1010450ZE_MINIMIZED_HOST_LISTING_GRACE: preserve public Lobby listing during temporary minimized-host reconnect. */
 export class MyRoom extends Room {
+  /* V1010560_RECONNECT_STORM_PAINT_SNAPSHOT_BACKPRESSURE_SERVER: throttle duplicate full Paint snapshot replies during reconnect storms. */
   /* V1010559_CHAT_SPAM_FALSE_POSITIVE_SERVER: IME/double-submit-safe flood control; hard warnings only for sustained spam. */
   /* V1010390_SERVER_MAP12_16_SAFE_RECOVERY: map1..map16 restored; forest remains lobby-only. */
   /* V1010388_SERVER_VICTORY_SHOWCASE: victory snapshot metadata for social-result cards. */
@@ -757,6 +758,13 @@ export class MyRoom extends Room {
     new Map<string, any[]>();
 
   /*
+   * V1010560_RECONNECT_STORM_PAINT_SNAPSHOT_BACKPRESSURE_SERVER / PER_SESSION_BACKPRESSURE
+   * Full Paint snapshots can contain many thousands of points.
+   */
+  private readonly roundPaintSnapshotLastSentAtBySessionId =
+    new Map<string, number>();
+
+  /*
    * V1010388_SERVER_VICTORY_SHOWCASE
    * Keep the exact place/order where each Hider was found.
    * This survives only until the round result card has been delivered.
@@ -1251,6 +1259,44 @@ export class MyRoom extends Room {
         this.state.phase === "paint" ||
         this.state.phase === "hunt" ||
         this.state.phase === "countdown";
+
+      const requester =
+        this.state.players.get(
+          client.sessionId,
+        );
+
+      const now =
+        Date.now();
+
+      /*
+       * V1010560_RECONNECT_STORM_PAINT_SNAPSHOT_BACKPRESSURE_SERVER / HEAVY_REPLY_THROTTLE
+       * The live incident had one Hunter session reconnecting every ~2s.
+       * Do not amplify a shaky socket with duplicate giant Paint payloads.
+       */
+      const minIntervalMs =
+        this.state.phase === "hunt" &&
+        requester?.role === "hunter"
+          ? 3000
+          : 700;
+
+      const lastSentAt =
+        this.roundPaintSnapshotLastSentAtBySessionId
+          .get(
+            client.sessionId,
+          ) ?? 0;
+
+      if (
+        now - lastSentAt <
+        minIntervalMs
+      ) {
+        return;
+      }
+
+      this.roundPaintSnapshotLastSentAtBySessionId
+        .set(
+          client.sessionId,
+          now,
+        );
 
       client.send(
         "round_paint_state",

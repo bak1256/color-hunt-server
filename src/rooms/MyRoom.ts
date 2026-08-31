@@ -1,3 +1,4 @@
+/* V1010564_REMOVE_FART_RAMPAGE_TEST_ONLY_SERVER: remove temporary direct Fart Rampage test endpoint; production Random Taunt remains. */
 /* V1010563_FART_RAMPAGE_HYPER_BOUNCE_REPEAT_TEST_SERVER: faster/wider sprint, mirrored wall bounce, 30Hz authority, repeated TEST restart. */
 /* V1010562D_FART_RAMPAGE_WIDE_SMOOTH_DASH_SERVER: wider asymmetric figure-eight, ~1.3x old travel speed, 60ms authority, 4s origin-cover return. */
 /* V1010562_HIDER_FART_RAMPAGE_SERVER: fourth Random Taunt = synchronized figure-eight Fart Rampage, midpoint smoke, exact-origin return. */
@@ -2238,9 +2239,6 @@ const gauge =
       this.startHiderCloneDanceParty(client);
     },
 
-    hider_fart_rampage_test: (client: Client, _message: Record<string, never>): void => {
-      this.startHiderFartRampage(client.sessionId,true);
-    },
 
     hider_hardened_taunt: (client: Client, _message: HiderHardenedTauntMessage): void => {
       this.handleHiderHardenedTaunt(client);

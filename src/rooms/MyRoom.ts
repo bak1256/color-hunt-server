@@ -1,3 +1,4 @@
+/* V1010562_HIDER_FART_RAMPAGE_SERVER: fourth Random Taunt = synchronized figure-eight Fart Rampage, midpoint smoke, exact-origin return. */
 /* V1010557_RANDOM_TAUNT_NO_IMMEDIATE_REPEAT_SERVER: Random Taunt cannot roll the same skill twice in a row for the same Hider. */
 /* V1010556_HIDER_LONG_SKILL_CANCEL_SERVER: server-authoritative manual cancel for Hardened + Clone Dance Party. */
 /* V1010555F_CLONE_DANCE_FIXED_OWNER_ASYMMETRIC_FORMATION_SERVER: real Hider stays at exact pre-skill coordinate; only the 10-clone formation center shifts randomly/asymmetrically. */
@@ -440,6 +441,10 @@ export class MyRoom extends Room {
 
   /* V1010557_RANDOM_TAUNT_NO_IMMEDIATE_REPEAT_SERVER: no back-to-back identical Random Taunt skill. */
   private readonly lastRandomTauntChoiceByHider=new Map<string,number>();
+  /* V1010562_HIDER_FART_RAMPAGE_SERVER: server-authoritative 8s figure-eight, exact-origin return. */
+  private readonly hiderFartRampageActive=new Set<string>();
+  private readonly hiderFartRampageGeneration=new Map<string,number>();
+  private readonly hiderFartRampageDurationMs=8_000;
   /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: support choice is mutually exclusive per hunter/round. */
   private readonly vulcanActiveHunters = new Set<string>();
   private readonly tacticalSupportCommittedHunters = new Set<string>();
@@ -2204,11 +2209,19 @@ const gauge =
        * 2 = Clone Dance Party
        */
       const previousChoice=this.lastRandomTauntChoiceByHider.get(id);
+      const rampageEligible=Math.max(0,this.state.phaseEndsAt-Date.now())>=this.hiderFartRampageDurationMs+350;
+      const tauntPool=rampageEligible ? [0,1,2,3] : [0,1,2];
       const choices=previousChoice===undefined
-        ? [0,1,2]
-        : [0,1,2].filter((candidate)=>candidate!==previousChoice);
+        ? tauntPool
+        : tauntPool.filter((candidate)=>candidate!==previousChoice);
       const choice=choices[Math.floor(Math.random()*choices.length)] ?? 0;
       this.lastRandomTauntChoiceByHider.set(id,choice);
+
+      /* V1010562_HIDER_FART_RAMPAGE_SERVER: fourth roll = Fart Rampage. Never start if Hunt cannot finish the full return path. */
+      if(choice===3){
+        this.startHiderFartRampage(id);
+        return;
+      }
 
       if(choice===0){
         this.handleHiderHardenedTaunt(client);
@@ -2221,6 +2234,10 @@ const gauge =
 
     hider_clone_dance_test: (client: Client): void => {
       this.startHiderCloneDanceParty(client);
+    },
+
+    hider_fart_rampage_test: (client: Client, _message: Record<string, never>): void => {
+      this.startHiderFartRampage(client.sessionId);
     },
 
     hider_hardened_taunt: (client: Client, _message: HiderHardenedTauntMessage): void => {
@@ -4742,6 +4759,75 @@ this.sendPaintReadyState(client);
       },
       this.cloneDancePartyDurationMs,
     );
+  }
+
+  /* V1010562_HIDER_FART_RAMPAGE_SERVER: playful but fair: ~8s path, average travel below Hunter normal speed, exact origin return. */
+  private startHiderFartRampage(sessionId:string):void {
+    if(this.state.phase!=="hunt"||this.hiderFartRampageActive.has(sessionId)) return;
+    const hider=this.state.players.get(sessionId);
+    if(!hider||hider.role!=="hider"||!hider.alive) return;
+    const remainingMs=Math.max(0,this.state.phaseEndsAt-Date.now());
+    if(remainingMs<this.hiderFartRampageDurationMs+350) return;
+
+    const originX=hider.x, originY=hider.y;
+    const generation=(this.hiderFartRampageGeneration.get(sessionId)??0)+1;
+    this.hiderFartRampageGeneration.set(sessionId,generation);
+    this.hiderFartRampageActive.add(sessionId);
+
+    /* Random orientation/direction, but always the same mathematical figure-eight. */
+    const rotation=Math.random()*Math.PI*2;
+    const direction=Math.random()<0.5?-1:1;
+    const ampX=58+Math.random()*12;
+    const ampY=34+Math.random()*10;
+    const startedAt=Date.now();
+    let nextFartAt=startedAt;
+    let midpointSmokeDone=false;
+
+    this.broadcast("hider_fart_rampage",{sessionId,stage:"start",x:originX,y:originY,originX,originY,durationMs:this.hiderFartRampageDurationMs,serverNow:startedAt});
+
+    const finish=(stage:"end"|"cancel",restoreOrigin:boolean):void=>{
+      if((this.hiderFartRampageGeneration.get(sessionId)??0)!==generation) return;
+      this.hiderFartRampageActive.delete(sessionId);
+      const current=this.state.players.get(sessionId);
+      if(restoreOrigin&&current&&current.alive){ current.x=originX; current.y=originY; }
+      this.broadcast("hider_fart_rampage",{sessionId,stage,x:restoreOrigin?originX:(current?.x??originX),y:restoreOrigin?originY:(current?.y??originY),originX,originY,durationMs:0,serverNow:Date.now()});
+    };
+
+    const tick=():void=>{
+      if((this.hiderFartRampageGeneration.get(sessionId)??0)!==generation) return;
+      const current=this.state.players.get(sessionId);
+      if(this.state.phase!=="hunt"||!current||!current.alive){ finish("cancel",false); return; }
+      const now=Date.now();
+      const t=Math.min(1,Math.max(0,(now-startedAt)/this.hiderFartRampageDurationMs));
+      if(t>=1){ finish("end",true); return; }
+
+      const u=t*direction;
+      const rawX=ampX*Math.sin(Math.PI*4*u);
+      const rawY=ampY*Math.sin(Math.PI*2*u);
+      const dx=rawX*Math.cos(rotation)-rawY*Math.sin(rotation);
+      const dy=rawX*Math.sin(rotation)+rawY*Math.cos(rotation);
+      const x=Math.max(24,Math.min(936,originX+dx));
+      const y=Math.max(24,Math.min(516,originY+dy));
+      current.x=x; current.y=y;
+
+      this.broadcast("hider_fart_rampage",{sessionId,stage:"move",x,y,originX,originY,durationMs:Math.max(0,this.hiderFartRampageDurationMs-(now-startedAt)),serverNow:now});
+
+      if(now>=nextFartAt){
+        nextFartAt=now+650+Math.floor(Math.random()*180);
+        this.broadcast("fart_burst",{hunterId:sessionId,x,y,radius:34+Math.floor(Math.random()*12),soundTier:1+Math.floor(Math.random()*2)});
+      }
+
+      /* The curve crosses the exact origin at t=.5. Leave one large 4.2s smoke marker there, then run away again. */
+      if(!midpointSmokeDone&&t>=0.5){
+        midpointSmokeDone=true;
+        current.x=originX; current.y=originY;
+        this.broadcast("hider_fart_rampage",{sessionId,stage:"smoke",x:originX,y:originY,originX,originY,durationMs:4200,serverNow:now});
+        this.broadcast("fart_burst",{hunterId:sessionId,x:originX,y:originY,radius:72,soundTier:3});
+      }
+
+      this.clock.setTimeout(tick,100);
+    };
+    this.clock.setTimeout(tick,80);
   }
 
   private cancelHiderCloneDanceParty(

@@ -1,3 +1,4 @@
+/* V1010562D_FART_RAMPAGE_WIDE_SMOOTH_DASH_SERVER: wider asymmetric figure-eight, ~1.3x old travel speed, 60ms authority, 4s origin-cover return. */
 /* V1010562_HIDER_FART_RAMPAGE_SERVER: fourth Random Taunt = synchronized figure-eight Fart Rampage, midpoint smoke, exact-origin return. */
 /* V1010557_RANDOM_TAUNT_NO_IMMEDIATE_REPEAT_SERVER: Random Taunt cannot roll the same skill twice in a row for the same Hider. */
 /* V1010556_HIDER_LONG_SKILL_CANCEL_SERVER: server-authoritative manual cancel for Hardened + Clone Dance Party. */
@@ -444,7 +445,7 @@ export class MyRoom extends Room {
   /* V1010562_HIDER_FART_RAMPAGE_SERVER: server-authoritative 8s figure-eight, exact-origin return. */
   private readonly hiderFartRampageActive=new Set<string>();
   private readonly hiderFartRampageGeneration=new Map<string,number>();
-  private readonly hiderFartRampageDurationMs=8_000;
+  private readonly hiderFartRampageDurationMs=10_200;
   /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: support choice is mutually exclusive per hunter/round. */
   private readonly vulcanActiveHunters = new Set<string>();
   private readonly tacticalSupportCommittedHunters = new Set<string>();
@@ -4762,72 +4763,103 @@ this.sendPaintReadyState(client);
   }
 
   /* V1010562_HIDER_FART_RAMPAGE_SERVER: playful but fair: ~8s path, average travel below Hunter normal speed, exact origin return. */
+  /* V1010562D_FART_RAMPAGE_WIDE_SMOOTH_DASH_SERVER: ~2x first-lobe range at ~1.3x old travel speed; smaller last lobe returns into the 4s origin smoke. */
   private startHiderFartRampage(sessionId:string):void {
-    if(this.state.phase!=="hunt"||this.hiderFartRampageActive.has(sessionId)) return;
+    if(this.state.phase!=="hunt"||this.hiderFartRampageActive.has(sessionId))return;
     const hider=this.state.players.get(sessionId);
-    if(!hider||hider.role!=="hider"||!hider.alive) return;
+    if(!hider||hider.role!=="hider"||!hider.alive)return;
     const remainingMs=Math.max(0,this.state.phaseEndsAt-Date.now());
-    if(remainingMs<this.hiderFartRampageDurationMs+350) return;
+    if(remainingMs<this.hiderFartRampageDurationMs+350)return;
 
-    const originX=hider.x, originY=hider.y;
+    const originX=hider.x,originY=hider.y;
     const generation=(this.hiderFartRampageGeneration.get(sessionId)??0)+1;
     this.hiderFartRampageGeneration.set(sessionId,generation);
     this.hiderFartRampageActive.add(sessionId);
 
-    /* Random orientation/direction, but always the same mathematical figure-eight. */
     const rotation=Math.random()*Math.PI*2;
     const direction=Math.random()<0.5?-1:1;
-    const ampX=58+Math.random()*12;
-    const ampY=34+Math.random()*10;
+    /* v562d: first lobe is about 2x the old range. */
+    const ampX=116+Math.random()*24;
+    const ampY=68+Math.random()*20;
+    /* Smaller second lobe puts the origin revisit ~4s before the final return. */
+    const secondLobeScale=0.65;
+    const originPassFraction=1/(1+secondLobeScale);
     const startedAt=Date.now();
-    let nextFartAt=startedAt;
+    let nextFartAt=startedAt+620;
     let midpointSmokeDone=false;
 
     this.broadcast("hider_fart_rampage",{sessionId,stage:"start",x:originX,y:originY,originX,originY,durationMs:this.hiderFartRampageDurationMs,serverNow:startedAt});
 
     const finish=(stage:"end"|"cancel",restoreOrigin:boolean):void=>{
-      if((this.hiderFartRampageGeneration.get(sessionId)??0)!==generation) return;
+      if((this.hiderFartRampageGeneration.get(sessionId)??0)!==generation)return;
       this.hiderFartRampageActive.delete(sessionId);
       const current=this.state.players.get(sessionId);
-      if(restoreOrigin&&current&&current.alive){ current.x=originX; current.y=originY; }
+      if(restoreOrigin&&current&&current.alive){current.x=originX;current.y=originY;}
       this.broadcast("hider_fart_rampage",{sessionId,stage,x:restoreOrigin?originX:(current?.x??originX),y:restoreOrigin?originY:(current?.y??originY),originX,originY,durationMs:0,serverNow:Date.now()});
     };
 
     const tick=():void=>{
-      if((this.hiderFartRampageGeneration.get(sessionId)??0)!==generation) return;
+      if((this.hiderFartRampageGeneration.get(sessionId)??0)!==generation)return;
       const current=this.state.players.get(sessionId);
-      if(this.state.phase!=="hunt"||!current||!current.alive){ finish("cancel",false); return; }
-      const now=Date.now();
-      const t=Math.min(1,Math.max(0,(now-startedAt)/this.hiderFartRampageDurationMs));
-      if(t>=1){ finish("end",true); return; }
+      if(this.state.phase!=="hunt"||!current||!current.alive){finish("cancel",false);return;}
 
-      const u=t*direction;
-      const rawX=ampX*Math.sin(Math.PI*4*u);
-      const rawY=ampY*Math.sin(Math.PI*2*u);
+      const now=Date.now();
+      const elapsed=now-startedAt;
+      const t=Math.min(1,Math.max(0,elapsed/this.hiderFartRampageDurationMs));
+      if(t>=1){finish("end",true);return;}
+
+      /*
+       * Asymmetric figure-eight:
+       * - large first lobe = the requested ~2x roam range
+       * - exact origin pass occurs with about 4.0s left
+       * - smaller second lobe visibly runs away again, then returns into smoke
+       * Segment durations are proportional to lobe size, keeping real travel
+       * speed around 1.3x v562 rather than becoming 2x+ faster than Hunter.
+       */
+      let p:number;
+      let scale:number;
+      if(t<originPassFraction){
+        const q=t/originPassFraction;
+        p=0.5*q*direction;
+        scale=1;
+      }else{
+        const q=(t-originPassFraction)/(1-originPassFraction);
+        p=(0.5+0.5*q)*direction;
+        scale=secondLobeScale;
+      }
+
+      const rawX=ampX*scale*Math.sin(Math.PI*4*p);
+      const rawY=ampY*scale*Math.sin(Math.PI*2*p);
       const dx=rawX*Math.cos(rotation)-rawY*Math.sin(rotation);
       const dy=rawX*Math.sin(rotation)+rawY*Math.cos(rotation);
       const x=Math.max(24,Math.min(936,originX+dx));
       const y=Math.max(24,Math.min(516,originY+dy));
-      current.x=x; current.y=y;
 
-      this.broadcast("hider_fart_rampage",{sessionId,stage:"move",x,y,originX,originY,durationMs:Math.max(0,this.hiderFartRampageDurationMs-(now-startedAt)),serverNow:now});
-
-      if(now>=nextFartAt){
-        nextFartAt=now+650+Math.floor(Math.random()*180);
-        this.broadcast("fart_burst",{hunterId:sessionId,x,y,radius:34+Math.floor(Math.random()*12),soundTier:1+Math.floor(Math.random()*2)});
-      }
-
-      /* The curve crosses the exact origin at t=.5. Leave one large 4.2s smoke marker there, then run away again. */
-      if(!midpointSmokeDone&&t>=0.5){
+      /* Exact origin fart once, with ~4s remaining so the landing is still covered. */
+      if(!midpointSmokeDone&&t>=originPassFraction){
         midpointSmokeDone=true;
-        current.x=originX; current.y=originY;
-        this.broadcast("hider_fart_rampage",{sessionId,stage:"smoke",x:originX,y:originY,originX,originY,durationMs:4200,serverNow:now});
-        this.broadcast("fart_burst",{hunterId:sessionId,x:originX,y:originY,radius:72,soundTier:3});
+        current.x=originX;current.y=originY;
+        this.broadcast("hider_fart_rampage",{sessionId,stage:"smoke",x:originX,y:originY,originX,originY,durationMs:4000,serverNow:now});
+        this.broadcast("fart_burst",{hunterId:sessionId,x:originX,y:originY,radius:76,soundTier:3});
+        nextFartAt=now+760;
+        this.clock.setTimeout(tick,60);
+        return;
       }
 
-      this.clock.setTimeout(tick,100);
+      current.x=x;current.y=y;
+      this.broadcast("hider_fart_rampage",{sessionId,stage:"move",x,y,originX,originY,durationMs:Math.max(0,this.hiderFartRampageDurationMs-elapsed),serverNow:now});
+
+      /* Each fart is also a brief client-side catch-up dash. */
+      if(now>=nextFartAt){
+        nextFartAt=now+760+Math.floor(Math.random()*180);
+        this.broadcast("fart_burst",{hunterId:sessionId,x,y,radius:38+Math.floor(Math.random()*12),soundTier:1+Math.floor(Math.random()*2)});
+      }
+
+      /* 60ms authority cadence + client interpolation removes the old 100ms stepping. */
+      this.clock.setTimeout(tick,60);
     };
-    this.clock.setTimeout(tick,80);
+
+    this.clock.setTimeout(tick,50);
   }
 
   private cancelHiderCloneDanceParty(

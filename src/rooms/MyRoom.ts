@@ -1,3 +1,4 @@
+/* V1010557_RANDOM_TAUNT_NO_IMMEDIATE_REPEAT_SERVER: Random Taunt cannot roll the same skill twice in a row for the same Hider. */
 /* V1010556_HIDER_LONG_SKILL_CANCEL_SERVER: server-authoritative manual cancel for Hardened + Clone Dance Party. */
 /* V1010555F_CLONE_DANCE_FIXED_OWNER_ASYMMETRIC_FORMATION_SERVER: real Hider stays at exact pre-skill coordinate; only the 10-clone formation center shifts randomly/asymmetrically. */
 /* V1010555E_REPAIR_CLONE_DANCE_RANDOM_OWNER_SERVER: restore pre-v555d source; safe class-member patch avoids Array<{...}> return-type brace corruption. */
@@ -435,6 +436,8 @@ export class MyRoom extends Room {
     new Map<string,{x:number;y:number}>();
   private readonly cloneDancePartyDurationMs=10_000;
 
+  /* V1010557_RANDOM_TAUNT_NO_IMMEDIATE_REPEAT_SERVER: no back-to-back identical Random Taunt skill. */
+  private readonly lastRandomTauntChoiceByHider=new Map<string,number>();
   /* V1010507_TACTICAL_VULCAN_AIR_SUPPORT: support choice is mutually exclusive per hunter/round. */
   private readonly vulcanActiveHunters = new Set<string>();
   private readonly tacticalSupportCommittedHunters = new Set<string>();
@@ -2114,7 +2117,20 @@ const gauge =
 
       /* Clone Dance already owns a safe generation-based cancellation path. */
       if(this.cloneDancePartyActiveHiders.has(id)){
-        this.cancelHiderCloneDanceParty(id);
+        const generation=this.cloneDancePartyGeneration.get(id) ?? 0;
+        this.cloneDancePartyGeneration.set(id,generation+1);
+        this.cloneDancePartyActiveHiders.delete(id);
+
+        this.broadcast("hider_clone_dance_party",{
+          sessionId:id,
+          stage:"end",
+          originX:hider.x,
+          originY:hider.y,
+          clones:[],
+          durationMs:0,
+          endsAt:0,
+          serverNow:Date.now(),
+        });
       }
     },
 
@@ -2138,7 +2154,12 @@ const gauge =
        * 1 = Triple Teleport
        * 2 = Clone Dance Party
        */
-      const choice=Math.floor(Math.random()*3);
+      const previousChoice=this.lastRandomTauntChoiceByHider.get(id);
+      const choices=previousChoice===undefined
+        ? [0,1,2]
+        : [0,1,2].filter((candidate)=>candidate!==previousChoice);
+      const choice=choices[Math.floor(Math.random()*choices.length)] ?? 0;
+      this.lastRandomTauntChoiceByHider.set(id,choice);
 
       if(choice===0){
         this.handleHiderHardenedTaunt(client);

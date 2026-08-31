@@ -157,6 +157,7 @@ type RoundEndReason =
 
 /* V1010450ZE_MINIMIZED_HOST_LISTING_GRACE: preserve public Lobby listing during temporary minimized-host reconnect. */
 export class MyRoom extends Room {
+  /* V1010559_CHAT_SPAM_FALSE_POSITIVE_SERVER: IME/double-submit-safe flood control; hard warnings only for sustained spam. */
   /* V1010390_SERVER_MAP12_16_SAFE_RECOVERY: map1..map16 restored; forest remains lobby-only. */
   /* V1010388_SERVER_VICTORY_SHOWCASE: victory snapshot metadata for social-result cards. */
   /* V1010366B_PAINT_HUNT_RECONNECT_BARRIER_EXACT: Paint->Hunt waits for a stable live roster and reconnect convergence. */
@@ -1302,12 +1303,6 @@ export class MyRoom extends Room {
               10_000,
           );
 
-      /*
-       * Spam protection (V1010451M7_SERVER_CHAT_SPAM_RELAX):
-       * - accidental same-message duplicate within 650ms is silently ignored
-       * - other messages faster than 300ms are blocked
-       * - max 8 accepted messages / 10 seconds
-       */
       const latest =
         timestamps[
           timestamps.length - 1
@@ -1327,10 +1322,15 @@ export class MyRoom extends Room {
         );
 
       /*
-       * V1010451M7_SERVER_CHAT_SPAM_RELAX
+       * V1010559_CHAT_SPAM_FALSE_POSITIVE_SERVER
        *
-       * Accidental duplicate submit (Enter/click firing twice) is ignored
-       * silently instead of showing a false "spam" warning.
+       * A single visible send can become two browser events on IME/mobile or
+       * during a reconnect/UI handoff. Those accidental duplicates must never
+       * show the user a "spam" warning.
+       *
+       * - same normalized text within 1.2s: silently ignore
+       * - any packet within 180ms of the last accepted message: silently ignore
+       * - only sustained flood (15 accepted messages / 10s) shows spam warning
        */
       if (
         previous &&
@@ -1338,19 +1338,22 @@ export class MyRoom extends Room {
           comparable &&
         now -
           previous.sentAt <
-          650
+          1_200
       ) {
         return;
       }
 
-      /*
-       * Real flood protection remains, but normal conversation is less strict.
-       */
       if (
+        latest > 0 &&
         now - latest <
-          300 ||
+          180
+      ) {
+        return;
+      }
+
+      if (
         timestamps.length >=
-          8
+          15
       ) {
         client.send(
           "chat_error",
@@ -6965,6 +6968,14 @@ this.sendPaintReadyState(client);
     this.liveSessionIds.delete(
       client.sessionId,
     );
+
+    this.chatRateHistory.delete(
+      client.sessionId,
+    );
+    this.chatLastNormalized.delete(
+      client.sessionId,
+    );
+
     this.markConnectionTopologyChanged();
 
     /*
@@ -8025,6 +8036,15 @@ this.sendPaintReadyState(client);
     this.fartGaugeUpdatedAt.clear();
     this.poopUntilByHunter.clear();
     this.poopLaughTriggeredHunters.clear();
+
+    /*
+     * V1010559_CHAT_SPAM_FALSE_POSITIVE_SERVER / ROUND_BOUNDARY_RESET
+     * The first chat after returning to Lobby must not inherit the previous
+     * round's short anti-flood window. Chat history is NOT cleared.
+     */
+    this.chatRateHistory.clear();
+    this.chatLastNormalized.clear();
+
     this.state.phase = "lobby";
 
     this.sniperActiveHunters.clear();

@@ -146,6 +146,23 @@ type BotSettingsMessage = {
 type BotPaintCompleteMessage = {
   targetSessionId?: string;
 };
+
+type BotAttentionKind =
+  | "movement"
+  | "taunt"
+  | "taunt_trail";
+
+type BotAttentionStimulus = {
+  serial: number;
+  hiderId: string;
+  kind: BotAttentionKind;
+  x: number;
+  y: number;
+  radius: number;
+  strength: number;
+  expiresAt: number;
+};
+
 type BotBrain = {
   heading: number;
   patrolX: number;
@@ -172,6 +189,13 @@ type BotBrain = {
 
   /* V1010565H_HARDENED_RAGE_LOCK: Hardened taunt creates a persistent priority target. */
   rageTargetId: string;
+
+  /* V1010565I_BOT_ATTENTION_STIMULUS: last-known stimulus investigation; never a hidden live-coordinate lock. */
+  attentionSerial: number;
+  attentionHiderId: string;
+  attentionX: number;
+  attentionY: number;
+  attentionUntil: number;
 };
 
 type Point = {
@@ -797,6 +821,18 @@ export class MyRoom extends Room {
   private readonly botSessionIds = new Set<string>();
   private readonly botBrainBySessionId = new Map<string, BotBrain>();
   private readonly lastMoveAtBySessionId = new Map<string, number>();
+
+  /* V1010565I_BOT_ATTENTION_STIMULUS: short-lived server-authoritative "something happened there" breadcrumbs. */
+  private readonly botAttentionStimuli: BotAttentionStimulus[] = [];
+  private botAttentionStimulusSerial = 0;
+  private readonly botTauntAttentionUntilByHider = new Map<string, number>();
+  private readonly botAttentionLastSampleByHider = new Map<
+    string,
+    { x: number; y: number; at: number }
+  >();
+  private readonly botAttentionLastTrailAtByHider = new Map<string, number>();
+  private readonly botAttentionLastTauntPingAtByHider = new Map<string, number>();
+
   private botDifficulty: BotDifficulty = "normal";
   /* V1010565B_BOT_LOBBY_RECONNECT_HOTFIX: Lobby +/- owns a virtual seat count; synchronized PlayerState is untouched. */
   private configuredBotCount = 0;
@@ -2373,6 +2409,33 @@ const gauge =
 
     hider_hardened_taunt: (client: Client, _message: HiderHardenedTauntMessage): void => {
       this.handleHiderHardenedTaunt(client);
+    },
+
+    /*
+     * V1010565I_BOT_ATTENTION_STIMULUS: Generic Random-Taunt attention signal for Hunter bots.
+     * Security/fairness: ignore all client coordinates; only authoritative
+     * PlayerState position is used. This cannot damage/kill or alter player
+     * movement—it only creates a short investigation breadcrumb.
+     */
+    hider_bot_taunt_ping: (
+      client: Client,
+      _message: { kind?: string },
+    ): void => {
+      if (this.state.phase !== "hunt") return;
+      const hider = this.state.players.get(client.sessionId);
+      if (!hider || hider.role !== "hider" || !hider.alive) return;
+
+      const now = Date.now();
+      const previous = this.botAttentionLastTauntPingAtByHider.get(client.sessionId) ?? 0;
+      if (now - previous < 800) return;
+      this.botAttentionLastTauntPingAtByHider.set(client.sessionId, now);
+
+      this.armBotTauntAttention(
+        client.sessionId,
+        hider.x,
+        hider.y,
+        now,
+      );
     },
 
     sniper_toggle: (
@@ -7735,10 +7798,20 @@ this.sendPaintReadyState(client);
       ignoreTargetId: "",
       ignoreTargetUntil: 0,
       rageTargetId: "",
+      attentionSerial: 0,
+      attentionHiderId: "",
+      attentionX: x,
+      attentionY: y,
+      attentionUntil: 0,
     };
   }
 
   private prepareBotsForPaint(): void {
+    this.botAttentionStimuli.length = 0;
+    this.botTauntAttentionUntilByHider.clear();
+    this.botAttentionLastSampleByHider.clear();
+    this.botAttentionLastTrailAtByHider.clear();
+    this.botAttentionLastTauntPingAtByHider.clear();
     this.botPaintFallbackAt = Date.now() + 8_000;
     for (const sessionId of this.botSessionIds) {
       const player = this.state.players.get(sessionId);
@@ -7972,6 +8045,9 @@ this.sendPaintReadyState(client);
 
     if (this.state.phase !== "hunt") return;
 
+    /* V1010565I_BOT_ATTENTION_STIMULUS: catches normal walking, dash, teleport and server-driven taunt motion. */
+    this.sampleHiderBotAttentionMovement(now);
+
     for (const sessionId of this.botSessionIds) {
       const player = this.state.players.get(sessionId);
       if (!player || !player.alive) continue;
@@ -7983,6 +8059,213 @@ this.sendPaintReadyState(client);
   private tickHiderBot(_sessionId: string, _player: PlayerState, _now: number): void {
     /* V1010565E_BOT_AI_VISUAL_LOBBY_POLISH: Hider bots choose their hiding spot in prepareBotsForPaint() and stay there. */
     return;
+  }
+
+  private pushBotAttentionStimulus(
+    hiderId: string,
+    kind: BotAttentionKind,
+    x: number,
+    y: number,
+    radius: number,
+    strength: number,
+    expiresAt: number,
+  ): void {
+    if (this.state.phase !== "hunt") return;
+
+    this.botAttentionStimulusSerial += 1;
+    this.botAttentionStimuli.push({
+      serial: this.botAttentionStimulusSerial,
+      hiderId,
+      kind,
+      x: Math.max(0, Math.min(960, x)),
+      y: Math.max(0, Math.min(540, y)),
+      radius: Math.max(40, Math.min(560, radius)),
+      strength: Math.max(0.1, Math.min(1.4, strength)),
+      expiresAt,
+    });
+
+    /* Bounded list: no long-room memory growth. */
+    if (this.botAttentionStimuli.length > 72) {
+      this.botAttentionStimuli.splice(0, this.botAttentionStimuli.length - 72);
+    }
+  }
+
+  private armBotTauntAttention(
+    hiderId: string,
+    x: number,
+    y: number,
+    now = Date.now(),
+  ): void {
+    /* Covers dash/teleport/clone/hardened and future Random Taunt variants. */
+    this.botTauntAttentionUntilByHider.set(hiderId, now + 5_200);
+    this.pushBotAttentionStimulus(
+      hiderId,
+      "taunt",
+      x,
+      y,
+      520,
+      1.18,
+      now + 1_450,
+    );
+  }
+
+  private sampleHiderBotAttentionMovement(now: number): void {
+    /* Prune expired breadcrumbs and dead/expired taunt windows first. */
+    for (let i = this.botAttentionStimuli.length - 1; i >= 0; i -= 1) {
+      const stimulus = this.botAttentionStimuli[i];
+      const hider = this.state.players.get(stimulus.hiderId);
+      if (
+        stimulus.expiresAt <= now ||
+        !hider ||
+        hider.role !== "hider" ||
+        !hider.alive
+      ) {
+        this.botAttentionStimuli.splice(i, 1);
+      }
+    }
+
+    for (const [hiderId, until] of this.botTauntAttentionUntilByHider) {
+      if (until <= now) this.botTauntAttentionUntilByHider.delete(hiderId);
+    }
+
+    for (const [hiderId, hider] of this.state.players) {
+      if (hider.role !== "hider" || !hider.alive) continue;
+
+      const previous = this.botAttentionLastSampleByHider.get(hiderId);
+      this.botAttentionLastSampleByHider.set(hiderId, {
+        x: hider.x,
+        y: hider.y,
+        at: now,
+      });
+      if (!previous) continue;
+
+      const dt = Math.max(16, Math.min(500, now - previous.at));
+      const dx = hider.x - previous.x;
+      const dy = hider.y - previous.y;
+      const distance = Math.hypot(dx, dy);
+      if (distance < 2.5) continue;
+
+      const speed = distance / dt * 1000;
+      const tauntBoost = (this.botTauntAttentionUntilByHider.get(hiderId) ?? 0) > now;
+      const lastTrail = this.botAttentionLastTrailAtByHider.get(hiderId) ?? 0;
+
+      if (tauntBoost && now - lastTrail >= 160) {
+        /* Loud/flashy taunt trail: strong attention, but only to the place just seen/heard. */
+        this.botAttentionLastTrailAtByHider.set(hiderId, now);
+        this.pushBotAttentionStimulus(
+          hiderId,
+          "taunt_trail",
+          hider.x,
+          hider.y,
+          465,
+          1.04,
+          now + 900,
+        );
+        continue;
+      }
+
+      if (speed >= 170 && now - lastTrail >= 210) {
+        /* Abnormally fast motion is conspicuous even without an armed taunt window. */
+        this.botAttentionLastTrailAtByHider.set(hiderId, now);
+        this.pushBotAttentionStimulus(
+          hiderId,
+          "movement",
+          hider.x,
+          hider.y,
+          300,
+          0.74,
+          now + 720,
+        );
+        continue;
+      }
+
+      if (speed >= 85 && now - lastTrail >= 340) {
+        /* Ordinary walking creates only a small nearby rustle. */
+        this.botAttentionLastTrailAtByHider.set(hiderId, now);
+        this.pushBotAttentionStimulus(
+          hiderId,
+          "movement",
+          hider.x,
+          hider.y,
+          180,
+          0.38,
+          now + 560,
+        );
+      }
+    }
+  }
+
+  private applyBotAttentionStimulus(
+    player: PlayerState,
+    brain: BotBrain,
+    now: number,
+    turnRateRad: number,
+  ): void {
+    if (
+      brain.rageTargetId ||
+      brain.targetId ||
+      brain.inspectTargetId ||
+      now < brain.modeUntil
+    ) {
+      return;
+    }
+
+    let best: BotAttentionStimulus | undefined;
+    let bestScore = -Infinity;
+
+    for (const stimulus of this.botAttentionStimuli) {
+      if (
+        stimulus.expiresAt <= now ||
+        stimulus.serial <= brain.attentionSerial ||
+        (
+          stimulus.hiderId === brain.ignoreTargetId &&
+          now < brain.ignoreTargetUntil
+        )
+      ) {
+        continue;
+      }
+
+      const source = this.state.players.get(stimulus.hiderId);
+      if (!source || source.role !== "hider" || !source.alive) continue;
+
+      const dx = stimulus.x - player.x;
+      const dy = stimulus.y - player.y;
+      const distance = Math.hypot(dx, dy);
+      if (distance > stimulus.radius) continue;
+
+      const proximity = 1 - Math.min(1, distance / stimulus.radius);
+      const recency = Math.max(0, Math.min(1, (stimulus.expiresAt - now) / 1450));
+      const score =
+        stimulus.strength * 1.45 +
+        proximity * 0.72 +
+        recency * 0.22 +
+        (stimulus.kind === "taunt" ? 0.18 : 0);
+
+      if (score > bestScore) {
+        best = stimulus;
+        bestScore = score;
+      }
+    }
+
+    if (!best) return;
+
+    brain.attentionSerial = best.serial;
+    brain.attentionHiderId = best.hiderId;
+    brain.attentionX = best.x;
+    brain.attentionY = best.y;
+    brain.attentionUntil = now +
+      (best.kind === "taunt" ? 1_850 : best.kind === "taunt_trail" ? 1_450 : 950);
+    brain.patrolX = best.x;
+    brain.patrolY = best.y;
+    brain.nextDecisionAt = now + 520;
+
+    /* Visible "what was that?" turn. Still not a target lock. */
+    const direction = Math.atan2(best.y - player.y, best.x - player.x);
+    brain.heading = this.turnBotAngleToward(
+      brain.heading,
+      direction,
+      turnRateRad * 0.34,
+    );
   }
 
   private tickHunterBot(sessionId: string, player: PlayerState, now: number): void {
@@ -8011,6 +8294,19 @@ this.sendPaintReadyState(client);
     const rageActive = brain.rageTargetId.length > 0;
     /* Normal miss-search must never cancel an already activated RAGE. */
     const searchingAfterMiss = !rageActive && now < brain.modeUntil;
+
+    if (brain.attentionUntil > 0 && now >= brain.attentionUntil) {
+      brain.attentionHiderId = "";
+      brain.attentionUntil = 0;
+    }
+
+    /* V1010565I_BOT_ATTENTION_STIMULUS: free Hunter turns/moves toward a recent commotion, never the hidden live Hider. */
+    this.applyBotAttentionStimulus(
+      player,
+      brain,
+      now,
+      cfg.turnRateRad,
+    );
 
     if (brain.ignoreTargetId && now >= brain.ignoreTargetUntil) {
       brain.ignoreTargetId = "";
@@ -8044,8 +8340,11 @@ this.sendPaintReadyState(client);
         const rageCandidate = targetId === brain.rageTargetId;
         const lastMoveAt = this.lastMoveAtBySessionId.get(targetId) ?? 0;
         const movingRecently = now - lastMoveAt < 1200;
+        const stimulusAttention =
+          targetId === brain.attentionHiderId &&
+          now < brain.attentionUntil;
         const attentionRange = cfg.visionRange *
-          (rageCandidate ? 1.12 : taunting ? 1.10 : movingRecently ? 1.04 : 1);
+          (rageCandidate ? 1.12 : taunting ? 1.10 : stimulusAttention ? 1.08 : movingRecently ? 1.04 : 1);
         if (distance > attentionRange) continue;
 
         const angle = Math.atan2(dy, dx);
@@ -8053,6 +8352,7 @@ this.sendPaintReadyState(client);
           88 * Math.PI / 180,
           baseHalfFov +
             (movingRecently ? 14 * Math.PI / 180 : 0) +
+            (stimulusAttention ? 20 * Math.PI / 180 : 0) +
             (taunting ? 30 * Math.PI / 180 : 0) +
             (rageCandidate ? 14 * Math.PI / 180 : 0),
         );
@@ -8075,6 +8375,9 @@ this.sendPaintReadyState(client);
       const rageCandidate = candidateId === brain.rageTargetId;
       const lastMoveAt = this.lastMoveAtBySessionId.get(candidateId) ?? 0;
       const movingRecently = now - lastMoveAt < 1200;
+      const stimulusAttention =
+        candidateId === brain.attentionHiderId &&
+        now < brain.attentionUntil;
       const stealth = this.getCamouflageStealthScore(candidateId, now);
       const distanceFactor = Math.max(0, Math.min(1, candidateDistance / cfg.visionRange));
       let threshold =
@@ -8084,6 +8387,7 @@ this.sendPaintReadyState(client);
 
       if (rageCandidate) threshold = Math.min(threshold, 70);
       else if (taunting) threshold = Math.min(threshold, movingRecently ? 70 : 160);
+      else if (stimulusAttention) threshold = Math.min(threshold, movingRecently ? 80 : 145);
       else if (movingRecently) threshold = Math.max(120, threshold * 0.42);
 
       if (now - brain.candidateSeenSince >= threshold) {
@@ -8141,15 +8445,19 @@ this.sendPaintReadyState(client);
         const rageTracking = brain.targetId === brain.rageTargetId;
         const lastMoveAt = this.lastMoveAtBySessionId.get(brain.targetId) ?? 0;
         const movingRecently = now - lastMoveAt < 1200;
+        const stimulusAttention =
+          brain.targetId === brain.attentionHiderId &&
+          now < brain.attentionUntil;
         const attentionHalfFov = Math.min(
           88 * Math.PI / 180,
           baseHalfFov +
             (movingRecently ? 14 * Math.PI / 180 : 0) +
+            (stimulusAttention ? 20 * Math.PI / 180 : 0) +
             (taunting ? 30 * Math.PI / 180 : 0) +
             (rageTracking ? 14 * Math.PI / 180 : 0),
         );
         const attentionRange = cfg.visionRange *
-          (rageTracking ? 1.12 : taunting ? 1.10 : movingRecently ? 1.04 : 1);
+          (rageTracking ? 1.12 : taunting ? 1.10 : stimulusAttention ? 1.08 : movingRecently ? 1.04 : 1);
         const diff = Math.abs(this.normalizeBotAngle(angle - brain.heading));
         targetVisible = dist <= attentionRange &&
           (dist <= bodySafeRadius || diff <= attentionHalfFov);
@@ -8364,9 +8672,33 @@ this.sendPaintReadyState(client);
     }
 
     if (!brain.targetId || searchingAfterMiss) {
-      const toPatrol = Math.hypot(brain.patrolX - player.x, brain.patrolY - player.y);
+      let toPatrol = Math.hypot(brain.patrolX - player.x, brain.patrolY - player.y);
+      const investigatingStimulus =
+        !brain.rageTargetId &&
+        !searchingAfterMiss &&
+        brain.attentionHiderId.length > 0 &&
+        now < brain.attentionUntil;
 
-      if (brain.rageTargetId && !brain.targetId) {
+      if (investigatingStimulus) {
+        const toStimulus = Math.hypot(
+          brain.attentionX - player.x,
+          brain.attentionY - player.y,
+        );
+
+        if (toStimulus > 22) {
+          brain.patrolX = brain.attentionX;
+          brain.patrolY = brain.attentionY;
+          brain.nextDecisionAt = Math.max(brain.nextDecisionAt, now + 420);
+        } else if (now >= brain.nextDecisionAt) {
+          /* Arrived: look around the LAST stimulus point, not current hidden coordinates. */
+          const a = Math.random() * Math.PI * 2;
+          const r = 24 + Math.random() * 54;
+          brain.patrolX = Math.max(28, Math.min(932, brain.attentionX + Math.cos(a) * r));
+          brain.patrolY = Math.max(44, Math.min(506, brain.attentionY + Math.sin(a) * r));
+          brain.nextDecisionAt = now + 360 + Math.random() * 360;
+        }
+        toPatrol = Math.hypot(brain.patrolX - player.x, brain.patrolY - player.y);
+      } else if (brain.rageTargetId && !brain.targetId) {
         /* Persistent last-seen search: still no access to hidden live position. */
         if (toPatrol < 18 || now >= brain.nextDecisionAt) {
           const a = Math.random() * Math.PI * 2;

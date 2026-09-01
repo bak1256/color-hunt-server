@@ -159,6 +159,16 @@ type BotBrain = {
   nextDecisionAt: number;
   modeUntil: number;
   lastAimBroadcastAt: number;
+
+  /* V1010565G_BOT_HUMANIZED_HUNT: short human-like inspection beat before a bot fires. */
+  inspectTargetId: string;
+  inspectStartedAt: number;
+  inspectSweepEndsAt: number;
+  inspectFireAt: number;
+  inspectMercy: boolean;
+  inspectMercyShown: boolean;
+  ignoreTargetId: string;
+  ignoreTargetUntil: number;
 };
 
 type Point = {
@@ -7713,6 +7723,14 @@ this.sendPaintReadyState(client);
       nextDecisionAt: 0,
       modeUntil: 0,
       lastAimBroadcastAt: 0,
+      inspectTargetId: "",
+      inspectStartedAt: 0,
+      inspectSweepEndsAt: 0,
+      inspectFireAt: 0,
+      inspectMercy: false,
+      inspectMercyShown: false,
+      ignoreTargetId: "",
+      ignoreTargetUntil: 0,
     };
   }
 
@@ -7974,6 +7992,12 @@ this.sendPaintReadyState(client);
     const baseHalfFov = 36 * Math.PI / 180;
     const bodySafeRadius = 42;
     const searchingAfterMiss = now < brain.modeUntil;
+
+    if (brain.ignoreTargetId && now >= brain.ignoreTargetUntil) {
+      brain.ignoreTargetId = "";
+      brain.ignoreTargetUntil = 0;
+    }
+
     let candidateId = "";
     let candidateDistance = Number.POSITIVE_INFINITY;
 
@@ -7981,6 +8005,11 @@ this.sendPaintReadyState(client);
     if (!searchingAfterMiss) {
       for (const [targetId, target] of this.state.players) {
         if (target.role !== "hider" || !target.alive) continue;
+        if (
+          targetId === brain.ignoreTargetId &&
+          now < brain.ignoreTargetUntil
+        ) continue;
+
         const dx = target.x - player.x;
         const dy = target.y - player.y;
         const distance = Math.hypot(dx, dy);
@@ -8021,7 +8050,7 @@ this.sendPaintReadyState(client);
         stealth * cfg.stealthPenaltyMs +
         distanceFactor * 360;
 
-      /* Taunting is intentionally risky; movement is also a strong visual cue. */
+      /* Taunting/movement remain strong visual stimuli from v565e. */
       if (taunting) threshold = Math.min(threshold, movingRecently ? 70 : 160);
       else if (movingRecently) threshold = Math.max(120, threshold * 0.42);
 
@@ -8048,6 +8077,7 @@ this.sendPaintReadyState(client);
       const target = this.state.players.get(brain.targetId);
       if (!target || target.role !== "hider" || !target.alive) {
         brain.targetId = "";
+        brain.inspectTargetId = "";
       } else {
         const dx = target.x - player.x;
         const dy = target.y - player.y;
@@ -8077,14 +8107,180 @@ this.sendPaintReadyState(client);
           targetY = brain.lastSeenY;
         } else {
           brain.targetId = "";
+          brain.inspectTargetId = "";
         }
+      }
+    }
+
+    /*
+     * V1010565G_BOT_HUMANIZED_HUNT / STOP_LOOK_HESITATE
+     * Once the bot has 100% committed to a target AND is actually in shotgun
+     * range, it does not swoop straight into an instant shot.  It plants its
+     * feet, visually sweeps its aim above/below the target, then either fires
+     * quickly or hesitates for a short random beat.
+     */
+    const inspectTarget = brain.targetId
+      ? this.state.players.get(brain.targetId)
+      : undefined;
+    const canStartInspection =
+      !searchingAfterMiss &&
+      inspectTarget &&
+      inspectTarget.role === "hider" &&
+      inspectTarget.alive &&
+      targetVisible &&
+      lockedTargetDistance <= this.pelletRange * 0.98;
+
+    if (
+      canStartInspection &&
+      brain.inspectTargetId !== brain.targetId
+    ) {
+      const sweepMs =
+        this.botDifficulty === "easy"
+          ? 900 + Math.random() * 500
+          : this.botDifficulty === "hard"
+            ? 430 + Math.random() * 320
+            : 620 + Math.random() * 430;
+
+      /* About half snap-shot after the sweep; half wait a bit longer. */
+      const extraFireDelay =
+        Math.random() < 0.55
+          ? 80 + Math.random() * 240
+          : 420 + Math.random() * 620;
+
+      brain.inspectTargetId = brain.targetId;
+      brain.inspectStartedAt = now;
+      brain.inspectSweepEndsAt = now + sweepMs;
+      brain.inspectFireAt = now + sweepMs + extraFireDelay;
+      brain.inspectMercy = Math.random() < 0.20;
+      brain.inspectMercyShown = false;
+    }
+
+    if (brain.inspectTargetId) {
+      const target = this.state.players.get(brain.inspectTargetId);
+      if (!target || target.role !== "hider" || !target.alive) {
+        brain.inspectTargetId = "";
+      } else {
+        /*
+         * Keep the old limited-vision contract even during the dramatic pause:
+         * if the Hider actually escapes our attention, do NOT keep tracking its
+         * hidden authoritative coordinates. Search the last seen point instead.
+         */
+        if (!targetVisible && now - brain.lastSeenAt > 420) {
+          brain.inspectTargetId = "";
+          brain.targetId = "";
+          brain.candidateId = "";
+          brain.candidateSeenSince = 0;
+          brain.modeUntil = now + 700 + Math.random() * 450;
+          const a = Math.random() * Math.PI * 2;
+          const r = 45 + Math.random() * 65;
+          brain.patrolX = Math.max(28, Math.min(932, brain.lastSeenX + Math.cos(a) * r));
+          brain.patrolY = Math.max(44, Math.min(506, brain.lastSeenY + Math.sin(a) * r));
+          return;
+        }
+
+        const aimX = targetVisible ? target.x : brain.lastSeenX;
+        const aimY = targetVisible ? target.y : brain.lastSeenY;
+        const perfectAngle = Math.atan2(aimY - player.y, aimX - player.x);
+        const elapsed = Math.max(0, now - brain.inspectStartedAt);
+        const sweepDuration = Math.max(1, brain.inspectSweepEndsAt - brain.inspectStartedAt);
+        const sweepProgress = Math.max(0, Math.min(1, elapsed / sweepDuration));
+
+        /*
+         * Literal screen-Y sweep: the cone looks a little above and below the
+         * Hider rather than roboticly pinning its center the whole time.
+         */
+        const sweepWave = Math.sin(elapsed / 115 * Math.PI);
+        const sweepOffsetY = sweepWave * (24 - sweepProgress * 7);
+        const scanAngle = Math.atan2(
+          aimY + sweepOffsetY - player.y,
+          aimX - player.x,
+        );
+        brain.heading = this.turnBotAngleToward(
+          brain.heading,
+          scanAngle,
+          cfg.turnRateRad * 0.11,
+        );
+
+        /* Intentionally NO moveBotToward() here: this pause creates tension. */
+        if (now - brain.lastAimBroadcastAt >= 75) {
+          brain.lastAimBroadcastAt = now;
+          this.broadcast("hunter_aim", {
+            sessionId,
+            angle: brain.heading,
+            range: this.pelletRange,
+          });
+        }
+
+        if (now >= brain.inspectSweepEndsAt && brain.inspectMercy) {
+          if (!brain.inspectMercyShown) {
+            brain.inspectMercyShown = true;
+            this.broadcast("bot_mercy", {
+              sessionId,
+              x: player.x,
+              y: player.y,
+              serverNow: now,
+            });
+          }
+
+          /* "후... 봐준다" — ignore only THIS Hider for a few seconds and
+           * deliberately veer away instead of freezing in front of them. */
+          brain.ignoreTargetId = brain.inspectTargetId;
+          brain.ignoreTargetUntil = now + 3_500 + Math.random() * 1_800;
+          brain.targetId = "";
+          brain.candidateId = "";
+          brain.candidateSeenSince = 0;
+          brain.inspectTargetId = "";
+
+          const away = perfectAngle + Math.PI + (Math.random() - 0.5) * 1.35;
+          const travel = 115 + Math.random() * 95;
+          brain.patrolX = Math.max(28, Math.min(932, player.x + Math.cos(away) * travel));
+          brain.patrolY = Math.max(44, Math.min(506, player.y + Math.sin(away) * travel));
+          brain.nextDecisionAt = brain.ignoreTargetUntil;
+          return;
+        }
+
+        if (now >= brain.inspectFireAt && !brain.inspectMercy) {
+          const error = (Math.random() * 2 - 1) * cfg.aimErrorRad;
+          const shot = this.fireBotHunterShot(sessionId, perfectAngle + error, now);
+
+          if (shot.fired) {
+            brain.inspectTargetId = "";
+
+            if (!shot.hit) {
+              /* Existing v565e miss response: move around the last sighting. */
+              brain.lastSeenX = target.x;
+              brain.lastSeenY = target.y;
+              brain.lastSeenAt = now;
+              brain.targetId = "";
+              brain.candidateId = "";
+              brain.candidateSeenSince = 0;
+              const a = perfectAngle + (Math.random() - 0.5) * Math.PI * 1.25;
+              const r = 48 + Math.random() * 72;
+              brain.patrolX = Math.max(28, Math.min(932, target.x + Math.cos(a) * r));
+              brain.patrolY = Math.max(44, Math.min(506, target.y + Math.sin(a) * r));
+              brain.modeUntil = now + 850 + Math.random() * 650;
+              brain.nextDecisionAt = brain.modeUntil + 350;
+            }
+            return;
+          }
+
+          /* Overheated/cooldown edge: don't become a permanent staring turret. */
+          if (now - brain.inspectFireAt > 1_250) {
+            brain.inspectTargetId = "";
+            brain.targetId = "";
+            brain.candidateId = "";
+            brain.modeUntil = now + 650;
+            brain.patrolX = Math.max(28, Math.min(932, player.x + (Math.random() - 0.5) * 150));
+            brain.patrolY = Math.max(44, Math.min(506, player.y + (Math.random() - 0.5) * 130));
+          }
+        }
+        return;
       }
     }
 
     if (!brain.targetId || searchingAfterMiss) {
       const toPatrol = Math.hypot(brain.patrolX - player.x, brain.patrolY - player.y);
       if (searchingAfterMiss) {
-        /* Keep moving around the last sighting during the miss-recovery window. */
         if (toPatrol < 18) {
           const a = Math.random() * Math.PI * 2;
           const r = 42 + Math.random() * 58;
@@ -8111,39 +8307,6 @@ this.sendPaintReadyState(client);
         angle: brain.heading,
         range: this.pelletRange,
       });
-    }
-
-    if (
-      !searchingAfterMiss &&
-      brain.targetId &&
-      targetVisible &&
-      lockedTargetDistance <= this.pelletRange * 0.96
-    ) {
-      const target = this.state.players.get(brain.targetId);
-      if (target) {
-        const perfectAngle = Math.atan2(target.y - player.y, target.x - player.x);
-        const facingError = Math.abs(this.normalizeBotAngle(perfectAngle - brain.heading));
-        if (facingError <= 10 * Math.PI / 180) {
-          const error = (Math.random() * 2 - 1) * cfg.aimErrorRad;
-          const shot = this.fireBotHunterShot(sessionId, perfectAngle + error, now);
-
-          if (shot.fired && !shot.hit) {
-            /* A miss/blocked shot is a stimulus to SEARCH, never an infinite turret state. */
-            brain.lastSeenX = target.x;
-            brain.lastSeenY = target.y;
-            brain.lastSeenAt = now;
-            brain.targetId = "";
-            brain.candidateId = "";
-            brain.candidateSeenSince = 0;
-            const a = perfectAngle + (Math.random() - 0.5) * Math.PI * 1.25;
-            const r = 48 + Math.random() * 72;
-            brain.patrolX = Math.max(28, Math.min(932, target.x + Math.cos(a) * r));
-            brain.patrolY = Math.max(44, Math.min(506, target.y + Math.sin(a) * r));
-            brain.modeUntil = now + 850 + Math.random() * 650;
-            brain.nextDecisionAt = brain.modeUntil + 350;
-          }
-        }
-      }
     }
   }
 

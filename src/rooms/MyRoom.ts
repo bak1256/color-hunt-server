@@ -169,6 +169,9 @@ type BotBrain = {
   inspectMercyShown: boolean;
   ignoreTargetId: string;
   ignoreTargetUntil: number;
+
+  /* V1010565H_HARDENED_RAGE_LOCK: Hardened taunt creates a persistent priority target. */
+  rageTargetId: string;
 };
 
 type Point = {
@@ -7731,6 +7734,7 @@ this.sendPaintReadyState(client);
       inspectMercyShown: false,
       ignoreTargetId: "",
       ignoreTargetUntil: 0,
+      rageTargetId: "",
     };
   }
 
@@ -7991,9 +7995,29 @@ this.sendPaintReadyState(client);
 
     const baseHalfFov = 36 * Math.PI / 180;
     const bodySafeRadius = 42;
-    const searchingAfterMiss = now < brain.modeUntil;
+
+    /* V1010565H_HARDENED_RAGE_LOCK / RAGE_LIFETIME: only death/removal ends the grudge. */
+    if (brain.rageTargetId) {
+      const rageTarget = this.state.players.get(brain.rageTargetId);
+      if (!rageTarget || rageTarget.role !== "hider" || !rageTarget.alive) {
+        if (brain.targetId === brain.rageTargetId) brain.targetId = "";
+        if (brain.candidateId === brain.rageTargetId) brain.candidateId = "";
+        if (brain.inspectTargetId === brain.rageTargetId) brain.inspectTargetId = "";
+        brain.rageTargetId = "";
+        brain.candidateSeenSince = 0;
+      }
+    }
+
+    const rageActive = brain.rageTargetId.length > 0;
+    /* Normal miss-search must never cancel an already activated RAGE. */
+    const searchingAfterMiss = !rageActive && now < brain.modeUntil;
 
     if (brain.ignoreTargetId && now >= brain.ignoreTargetUntil) {
+      brain.ignoreTargetId = "";
+      brain.ignoreTargetUntil = 0;
+    }
+    if (rageActive) {
+      /* Hardened target can never receive the 20% mercy cooldown. */
       brain.ignoreTargetId = "";
       brain.ignoreTargetUntil = 0;
     }
@@ -8001,11 +8025,14 @@ this.sendPaintReadyState(client);
     let candidateId = "";
     let candidateDistance = Number.POSITIVE_INFINITY;
 
-    /* After a real fired miss, move/search briefly instead of instantly re-locking. */
     if (!searchingAfterMiss) {
       for (const [targetId, target] of this.state.players) {
         if (target.role !== "hider" || !target.alive) continue;
+
+        /* V1010565H_HARDENED_RAGE_LOCK: while raging, every other Hider loses target priority. */
+        if (rageActive && targetId !== brain.rageTargetId) continue;
         if (
+          !rageActive &&
           targetId === brain.ignoreTargetId &&
           now < brain.ignoreTargetUntil
         ) continue;
@@ -8014,16 +8041,20 @@ this.sendPaintReadyState(client);
         const dy = target.y - player.y;
         const distance = Math.hypot(dx, dy);
         const taunting = this.isHiderHardened(targetId);
+        const rageCandidate = targetId === brain.rageTargetId;
         const lastMoveAt = this.lastMoveAtBySessionId.get(targetId) ?? 0;
         const movingRecently = now - lastMoveAt < 1200;
-        const attentionRange = cfg.visionRange * (taunting ? 1.10 : movingRecently ? 1.04 : 1);
+        const attentionRange = cfg.visionRange *
+          (rageCandidate ? 1.12 : taunting ? 1.10 : movingRecently ? 1.04 : 1);
         if (distance > attentionRange) continue;
+
         const angle = Math.atan2(dy, dx);
         const attentionHalfFov = Math.min(
-          82 * Math.PI / 180,
+          88 * Math.PI / 180,
           baseHalfFov +
             (movingRecently ? 14 * Math.PI / 180 : 0) +
-            (taunting ? 30 * Math.PI / 180 : 0),
+            (taunting ? 30 * Math.PI / 180 : 0) +
+            (rageCandidate ? 14 * Math.PI / 180 : 0),
         );
         const diff = Math.abs(this.normalizeBotAngle(angle - brain.heading));
         if (distance > bodySafeRadius && diff > attentionHalfFov) continue;
@@ -8041,6 +8072,7 @@ this.sendPaintReadyState(client);
       }
 
       const taunting = this.isHiderHardened(candidateId);
+      const rageCandidate = candidateId === brain.rageTargetId;
       const lastMoveAt = this.lastMoveAtBySessionId.get(candidateId) ?? 0;
       const movingRecently = now - lastMoveAt < 1200;
       const stealth = this.getCamouflageStealthScore(candidateId, now);
@@ -8050,8 +8082,8 @@ this.sendPaintReadyState(client);
         stealth * cfg.stealthPenaltyMs +
         distanceFactor * 360;
 
-      /* Taunting/movement remain strong visual stimuli from v565e. */
-      if (taunting) threshold = Math.min(threshold, movingRecently ? 70 : 160);
+      if (rageCandidate) threshold = Math.min(threshold, 70);
+      else if (taunting) threshold = Math.min(threshold, movingRecently ? 70 : 160);
       else if (movingRecently) threshold = Math.max(120, threshold * 0.42);
 
       if (now - brain.candidateSeenSince >= threshold) {
@@ -8061,6 +8093,28 @@ this.sendPaintReadyState(client);
           brain.lastSeenX = target.x;
           brain.lastSeenY = target.y;
           brain.lastSeenAt = now;
+
+          /*
+           * V1010565H_HARDENED_RAGE_LOCK / HARDENED_TAUNT_RAGE
+           * First positive detection WHILE Hardened permanently flips this bot
+           * into RAGE against that Hider.  Hardened expiring later does NOT
+           * erase the grudge; only elimination/removal does.
+           */
+          if (taunting && !brain.rageTargetId) {
+            brain.rageTargetId = candidateId;
+            brain.ignoreTargetId = "";
+            brain.ignoreTargetUntil = 0;
+            brain.inspectMercy = false;
+            brain.inspectMercyShown = false;
+            brain.modeUntil = 0;
+            this.broadcast("bot_rage", {
+              sessionId,
+              targetSessionId: candidateId,
+              x: player.x,
+              y: player.y,
+              serverNow: now,
+            });
+          }
         }
       }
     } else if (!searchingAfterMiss) {
@@ -8084,17 +8138,22 @@ this.sendPaintReadyState(client);
         const dist = Math.hypot(dx, dy);
         const angle = Math.atan2(dy, dx);
         const taunting = this.isHiderHardened(brain.targetId);
+        const rageTracking = brain.targetId === brain.rageTargetId;
         const lastMoveAt = this.lastMoveAtBySessionId.get(brain.targetId) ?? 0;
         const movingRecently = now - lastMoveAt < 1200;
         const attentionHalfFov = Math.min(
-          82 * Math.PI / 180,
+          88 * Math.PI / 180,
           baseHalfFov +
             (movingRecently ? 14 * Math.PI / 180 : 0) +
-            (taunting ? 30 * Math.PI / 180 : 0),
+            (taunting ? 30 * Math.PI / 180 : 0) +
+            (rageTracking ? 14 * Math.PI / 180 : 0),
         );
-        const attentionRange = cfg.visionRange * (taunting ? 1.10 : movingRecently ? 1.04 : 1);
+        const attentionRange = cfg.visionRange *
+          (rageTracking ? 1.12 : taunting ? 1.10 : movingRecently ? 1.04 : 1);
         const diff = Math.abs(this.normalizeBotAngle(angle - brain.heading));
-        targetVisible = dist <= attentionRange && (dist <= bodySafeRadius || diff <= attentionHalfFov);
+        targetVisible = dist <= attentionRange &&
+          (dist <= bodySafeRadius || diff <= attentionHalfFov);
+
         if (targetVisible) {
           brain.lastSeenX = target.x;
           brain.lastSeenY = target.y;
@@ -8106,19 +8165,20 @@ this.sendPaintReadyState(client);
           targetX = brain.lastSeenX;
           targetY = brain.lastSeenY;
         } else {
+          /* No coordinate cheating. RAGE survives, target lock does not. */
           brain.targetId = "";
           brain.inspectTargetId = "";
+          if (rageTracking) {
+            const a = Math.random() * Math.PI * 2;
+            const r = 45 + Math.random() * 75;
+            brain.patrolX = Math.max(28, Math.min(932, brain.lastSeenX + Math.cos(a) * r));
+            brain.patrolY = Math.max(44, Math.min(506, brain.lastSeenY + Math.sin(a) * r));
+            brain.nextDecisionAt = now + 650 + Math.random() * 550;
+          }
         }
       }
     }
 
-    /*
-     * V1010565G_BOT_HUMANIZED_HUNT / STOP_LOOK_HESITATE
-     * Once the bot has 100% committed to a target AND is actually in shotgun
-     * range, it does not swoop straight into an instant shot.  It plants its
-     * feet, visually sweeps its aim above/below the target, then either fires
-     * quickly or hesitates for a short random beat.
-     */
     const inspectTarget = brain.targetId
       ? this.state.players.get(brain.targetId)
       : undefined;
@@ -8134,16 +8194,18 @@ this.sendPaintReadyState(client);
       canStartInspection &&
       brain.inspectTargetId !== brain.targetId
     ) {
-      const sweepMs =
-        this.botDifficulty === "easy"
+      const rageInspection = brain.targetId === brain.rageTargetId;
+      const sweepMs = rageInspection
+        ? 220 + Math.random() * 180
+        : this.botDifficulty === "easy"
           ? 900 + Math.random() * 500
           : this.botDifficulty === "hard"
             ? 430 + Math.random() * 320
             : 620 + Math.random() * 430;
 
-      /* About half snap-shot after the sweep; half wait a bit longer. */
-      const extraFireDelay =
-        Math.random() < 0.55
+      const extraFireDelay = rageInspection
+        ? 45 + Math.random() * 150
+        : Math.random() < 0.55
           ? 80 + Math.random() * 240
           : 420 + Math.random() * 620;
 
@@ -8151,30 +8213,32 @@ this.sendPaintReadyState(client);
       brain.inspectStartedAt = now;
       brain.inspectSweepEndsAt = now + sweepMs;
       brain.inspectFireAt = now + sweepMs + extraFireDelay;
-      brain.inspectMercy = Math.random() < 0.20;
+      brain.inspectMercy = rageInspection ? false : Math.random() < 0.20;
       brain.inspectMercyShown = false;
     }
 
     if (brain.inspectTargetId) {
       const target = this.state.players.get(brain.inspectTargetId);
+      const rageInspection = brain.inspectTargetId === brain.rageTargetId;
+
       if (!target || target.role !== "hider" || !target.alive) {
         brain.inspectTargetId = "";
+        if (rageInspection) brain.rageTargetId = "";
       } else {
-        /*
-         * Keep the old limited-vision contract even during the dramatic pause:
-         * if the Hider actually escapes our attention, do NOT keep tracking its
-         * hidden authoritative coordinates. Search the last seen point instead.
-         */
         if (!targetVisible && now - brain.lastSeenAt > 420) {
           brain.inspectTargetId = "";
           brain.targetId = "";
           brain.candidateId = "";
           brain.candidateSeenSince = 0;
-          brain.modeUntil = now + 700 + Math.random() * 450;
+
           const a = Math.random() * Math.PI * 2;
           const r = 45 + Math.random() * 65;
           brain.patrolX = Math.max(28, Math.min(932, brain.lastSeenX + Math.cos(a) * r));
           brain.patrolY = Math.max(44, Math.min(506, brain.lastSeenY + Math.sin(a) * r));
+          brain.nextDecisionAt = now + 650 + Math.random() * 550;
+
+          /* Normal AI gets a brief miss/search lockout; RAGE immediately hunts. */
+          if (!rageInspection) brain.modeUntil = now + 700 + Math.random() * 450;
           return;
         }
 
@@ -8184,13 +8248,9 @@ this.sendPaintReadyState(client);
         const elapsed = Math.max(0, now - brain.inspectStartedAt);
         const sweepDuration = Math.max(1, brain.inspectSweepEndsAt - brain.inspectStartedAt);
         const sweepProgress = Math.max(0, Math.min(1, elapsed / sweepDuration));
-
-        /*
-         * Literal screen-Y sweep: the cone looks a little above and below the
-         * Hider rather than roboticly pinning its center the whole time.
-         */
         const sweepWave = Math.sin(elapsed / 115 * Math.PI);
-        const sweepOffsetY = sweepWave * (24 - sweepProgress * 7);
+        const sweepAmplitude = rageInspection ? 13 : 24 - sweepProgress * 7;
+        const sweepOffsetY = sweepWave * sweepAmplitude;
         const scanAngle = Math.atan2(
           aimY + sweepOffsetY - player.y,
           aimX - player.x,
@@ -8198,10 +8258,9 @@ this.sendPaintReadyState(client);
         brain.heading = this.turnBotAngleToward(
           brain.heading,
           scanAngle,
-          cfg.turnRateRad * 0.11,
+          cfg.turnRateRad * (rageInspection ? 0.13 : 0.11),
         );
 
-        /* Intentionally NO moveBotToward() here: this pause creates tension. */
         if (now - brain.lastAimBroadcastAt >= 75) {
           brain.lastAimBroadcastAt = now;
           this.broadcast("hunter_aim", {
@@ -8211,7 +8270,8 @@ this.sendPaintReadyState(client);
           });
         }
 
-        if (now >= brain.inspectSweepEndsAt && brain.inspectMercy) {
+        /* Normal 20% mercy is completely disabled in RAGE. */
+        if (now >= brain.inspectSweepEndsAt && brain.inspectMercy && !rageInspection) {
           if (!brain.inspectMercyShown) {
             brain.inspectMercyShown = true;
             this.broadcast("bot_mercy", {
@@ -8222,8 +8282,6 @@ this.sendPaintReadyState(client);
             });
           }
 
-          /* "후... 봐준다" — ignore only THIS Hider for a few seconds and
-           * deliberately veer away instead of freezing in front of them. */
           brain.ignoreTargetId = brain.inspectTargetId;
           brain.ignoreTargetUntil = now + 3_500 + Math.random() * 1_800;
           brain.targetId = "";
@@ -8246,8 +8304,30 @@ this.sendPaintReadyState(client);
           if (shot.fired) {
             brain.inspectTargetId = "";
 
+            if (rageInspection) {
+              /*
+               * V1010565H_HARDENED_RAGE_LOCK / SHOOT_UNTIL_DEAD
+               * Miss, blocked Hardened pellet, or surviving target: do NOT
+               * forgive, do NOT switch targets, do NOT enter miss-search.
+               * The next legal shotgun/HEAT window starts another short scan.
+               */
+              const stillAlive = this.state.players.get(brain.rageTargetId);
+              if (!stillAlive || stillAlive.role !== "hider" || !stillAlive.alive) {
+                brain.rageTargetId = "";
+                brain.targetId = "";
+                brain.candidateId = "";
+              } else {
+                brain.targetId = brain.rageTargetId;
+                brain.candidateId = brain.rageTargetId;
+                brain.candidateSeenSince = now;
+                brain.lastSeenX = target.x;
+                brain.lastSeenY = target.y;
+                brain.lastSeenAt = now;
+              }
+              return;
+            }
+
             if (!shot.hit) {
-              /* Existing v565e miss response: move around the last sighting. */
               brain.lastSeenX = target.x;
               brain.lastSeenY = target.y;
               brain.lastSeenAt = now;
@@ -8264,7 +8344,12 @@ this.sendPaintReadyState(client);
             return;
           }
 
-          /* Overheated/cooldown edge: don't become a permanent staring turret. */
+          if (rageInspection) {
+            /* Cooldown/overheat waits in place; normal HEAT rules still win. */
+            brain.inspectFireAt = now + 120;
+            return;
+          }
+
           if (now - brain.inspectFireAt > 1_250) {
             brain.inspectTargetId = "";
             brain.targetId = "";
@@ -8280,7 +8365,17 @@ this.sendPaintReadyState(client);
 
     if (!brain.targetId || searchingAfterMiss) {
       const toPatrol = Math.hypot(brain.patrolX - player.x, brain.patrolY - player.y);
-      if (searchingAfterMiss) {
+
+      if (brain.rageTargetId && !brain.targetId) {
+        /* Persistent last-seen search: still no access to hidden live position. */
+        if (toPatrol < 18 || now >= brain.nextDecisionAt) {
+          const a = Math.random() * Math.PI * 2;
+          const r = 42 + Math.random() * 78;
+          brain.patrolX = Math.max(28, Math.min(932, brain.lastSeenX + Math.cos(a) * r));
+          brain.patrolY = Math.max(44, Math.min(506, brain.lastSeenY + Math.sin(a) * r));
+          brain.nextDecisionAt = now + 650 + Math.random() * 600;
+        }
+      } else if (searchingAfterMiss) {
         if (toPatrol < 18) {
           const a = Math.random() * Math.PI * 2;
           const r = 42 + Math.random() * 58;

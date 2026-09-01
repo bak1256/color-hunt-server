@@ -7932,10 +7932,13 @@ this.sendPaintReadyState(client);
     for (const ch of String(this.state.activeMap)) mapHash = (mapHash * 33 + ch.charCodeAt(0)) >>> 0;
     const palette = families[mapHash % families.length];
     const cfg = this.botDifficulty === "easy"
-      ? { step: 5, size: 12 }
+      /* V1010565Q_BOT_ROLE_BALANCE_REWORK: fallback EASY = old NORMAL */
+      ? { step: 3, size: 8 }
       : this.botDifficulty === "hard"
-        ? { step: 2, size: 6 }
-        : { step: 3, size: 8 };
+        /* HARD is slightly denser/smaller than old HARD */
+        ? { step: 2, size: 5 }
+        /* NORMAL = old HARD */
+        : { step: 2, size: 6 };
     const buckets = new Map<string, any[]>();
     for (let y = 2; y <= 118; y += cfg.step) {
       const wave = Math.sin((y + mapHash % 17) * 0.21) * 1.4;
@@ -7979,39 +7982,44 @@ this.sendPaintReadyState(client);
     hiderFidgetDistance: number;
     hiderMoveSpeed: number;
   } {
-    /* V1010565E_BOT_AI_VISUAL_LOBBY_POLISH: human Hunter production speed is 125; difficulty must never grant movement cheats. */
+    /*
+     * V1010565Q_BOT_ROLE_BALANCE_REWORK / ASYMMETRIC_ROLE_BALANCE
+     * Hider bots became stronger, while Hunter bots are intentionally slower,
+     * shorter-ranged and more respectful of real background camouflage.
+     * Human Hunter production speed remains 125; bots never exceed it.
+     */
     if (this.botDifficulty === "easy") return {
-      speed: 125,
-      visionRange: 340,
-      reactionBaseMs: 1150,
-      stealthPenaltyMs: 2100,
-      memoryMs: 1800,
-      aimErrorRad: 12 * Math.PI / 180,
-      turnRateRad: 1.5,
+      speed: 85,
+      visionRange: 245,
+      reactionBaseMs: 1_650,
+      stealthPenaltyMs: 3_000,
+      memoryMs: 900,
+      aimErrorRad: 18 * Math.PI / 180,
+      turnRateRad: 1.0,
       hiderFidgetEveryMs: Number.POSITIVE_INFINITY,
       hiderFidgetDistance: 0,
       hiderMoveSpeed: 0,
     };
     if (this.botDifficulty === "hard") return {
-      speed: 125,
-      visionRange: 427.5,
-      reactionBaseMs: 260,
-      stealthPenaltyMs: 700,
-      memoryMs: 4800,
-      aimErrorRad: 2.5 * Math.PI / 180,
-      turnRateRad: 3.8,
+      speed: 110,
+      visionRange: 350,
+      reactionBaseMs: 720,
+      stealthPenaltyMs: 1_850,
+      memoryMs: 2_700,
+      aimErrorRad: 7 * Math.PI / 180,
+      turnRateRad: 2.2,
       hiderFidgetEveryMs: Number.POSITIVE_INFINITY,
       hiderFidgetDistance: 0,
       hiderMoveSpeed: 0,
     };
     return {
-      speed: 125,
-      visionRange: 427.5,
-      reactionBaseMs: 560,
-      stealthPenaltyMs: 1250,
-      memoryMs: 3400,
-      aimErrorRad: 6 * Math.PI / 180,
-      turnRateRad: 2.7,
+      speed: 100,
+      visionRange: 300,
+      reactionBaseMs: 1_250,
+      stealthPenaltyMs: 2_450,
+      memoryMs: 1_550,
+      aimErrorRad: 13 * Math.PI / 180,
+      turnRateRad: 1.45,
       hiderFidgetEveryMs: Number.POSITIVE_INFINITY,
       hiderFidgetDistance: 0,
       hiderMoveSpeed: 0,
@@ -8019,11 +8027,10 @@ this.sendPaintReadyState(client);
   }
 
   /*
-   * V1010565D_BOT_READY_EARLY_HUNT
-   * If no human Hunter exists, nobody can press the Hunter-only early-start
-   * button. Treat all-bot Hunters as consenting automatically, but ONLY after
-   * every alive Hider is READY and the existing Paint->Hunt safety barrier is
-   * satisfied. Bots still do not invoke skills/ultimates/taunts.
+   * V1010565Q2_RESTORE_BOT_HUNTER_AUTO_START_HELPER
+   * v565q replaced getBotDifficultyConfig() up to tickBots(), and that range
+   * also contained the v565d all-bot-Hunter Paint -> Hunt helper.
+   * Restore ONLY that helper. Balance/FOV/speed/camouflage logic is untouched.
    */
   private tryAutoStartHuntForBotHunters(
     now = Date.now(),
@@ -8060,8 +8067,10 @@ this.sendPaintReadyState(client);
       return;
     }
 
-    /* Match the existing human-Hunter early_start_hunt path: open the
-     * authoritative Paint deadline before entering startHuntPhase(). */
+    /*
+     * Same authoritative early-start contract as v565d:
+     * open the Paint deadline, then enter the normal Hunt transition.
+     */
     this.state.phaseEndsAt =
       Date.now();
 
@@ -8327,7 +8336,8 @@ this.sendPaintReadyState(client);
       this.botBrainBySessionId.set(sessionId, brain);
     }
 
-    const baseHalfFov = 36 * Math.PI / 180;
+    /* V1010565Q_BOT_ROLE_BALANCE_REWORK: 60-degree base cone instead of 72. */
+    const baseHalfFov = 30 * Math.PI / 180;
     const bodySafeRadius = 42;
 
     /* V1010565H_HARDENED_RAGE_LOCK / RAGE_LIFETIME: only death/removal ends the grudge. */
@@ -8431,10 +8441,22 @@ this.sendPaintReadyState(client);
         now < brain.attentionUntil;
       const stealth = this.getCamouflageStealthScore(candidateId, now);
       const distanceFactor = Math.max(0, Math.min(1, candidateDistance / cfg.visionRange));
+
+      /*
+       * V1010565Q_BOT_ROLE_BALANCE_REWORK / CAMOUFLAGE_CURVE
+       * Real paint-vs-background similarity already dominates stealth (v565j).
+       * Give GOOD stationary camouflage an extra nonlinear delay so a close
+       * color match is meaningfully safer instead of merely a small bonus.
+       */
+      const highCamouflageBonusMs =
+        stealth > 0.62
+          ? ((stealth - 0.62) / 0.38) * cfg.stealthPenaltyMs * 0.55
+          : 0;
       let threshold =
         cfg.reactionBaseMs +
         stealth * cfg.stealthPenaltyMs +
-        distanceFactor * 360;
+        highCamouflageBonusMs +
+        distanceFactor * 420;
 
       if (rageCandidate) threshold = Math.min(threshold, 70);
       else if (taunting) threshold = Math.min(threshold, movingRecently ? 70 : 160);
@@ -8851,13 +8873,13 @@ this.sendPaintReadyState(client);
 
       if (this.botSessionIds.has(sessionId)) {
         /* Bot paint quality already differs by difficulty; keep only a small nudge. */
-        stealth += this.botDifficulty === "hard" ? 0.04 : this.botDifficulty === "easy" ? -0.04 : 0.01;
+        stealth += this.botDifficulty === "hard" ? 0.08 : this.botDifficulty === "easy" ? 0.01 : 0.04;
       }
     } else {
       /* Safe fallback for Host handoff / score not received yet. */
       stealth = coverage * 0.72 + variety * 0.18;
       if (this.botSessionIds.has(sessionId)) {
-        stealth += this.botDifficulty === "hard" ? 0.10 : this.botDifficulty === "easy" ? -0.08 : 0.03;
+        stealth += this.botDifficulty === "hard" ? 0.14 : this.botDifficulty === "easy" ? 0.03 : 0.10;
       }
     }
 

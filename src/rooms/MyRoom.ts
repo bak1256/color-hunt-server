@@ -728,7 +728,10 @@ export class MyRoom extends Room {
         paintDurationMs:
           this.paintDurationMs,
         huntDurationMs: this.huntDurationMs,
-        botCount: this.botSessionIds.size,
+        botCount:
+          this.state.phase === "lobby"
+            ? this.configuredBotCount
+            : this.botSessionIds.size,
         botDifficulty: this.botDifficulty,
         /* V101072_PHASE_RECOVERY_SNAPSHOT */
         phase:
@@ -782,6 +785,8 @@ export class MyRoom extends Room {
   private readonly botBrainBySessionId = new Map<string, BotBrain>();
   private readonly lastMoveAtBySessionId = new Map<string, number>();
   private botDifficulty: BotDifficulty = "normal";
+  /* V1010565B_BOT_LOBBY_RECONNECT_HOTFIX: Lobby +/- owns a virtual seat count; synchronized PlayerState is untouched. */
+  private configuredBotCount = 0;
   private botSequence = 0;
   private botPaintFallbackAt = 0;
 
@@ -836,7 +841,16 @@ export class MyRoom extends Room {
         if (Number.isFinite(requested)) {
           const humanSeatCount = this.liveSessionIds.size;
           const maxBots = Math.max(0, this.maxClients - humanSeatCount);
-          this.setBotCount(Math.max(0, Math.min(maxBots, Math.floor(requested))));
+          /*
+           * V1010565B_BOT_LOBBY_RECONNECT_HOTFIX / NO_SCHEMA_CHURN_ON_PLUS_MINUS
+           * Never add/delete PlayerState here. The previous path mutated the
+           * synchronized players MapSchema directly on every click, which is
+           * exactly the path correlated with the transport reconnect storm.
+           */
+          this.configuredBotCount = Math.max(
+            0,
+            Math.min(maxBots, 9, Math.floor(requested)),
+          );
         }
       }
 
@@ -1829,6 +1843,13 @@ export class MyRoom extends Room {
         );
         return;
       }
+
+      /*
+       * V1010565B_BOT_LOBBY_RECONNECT_HOTFIX / MATERIALIZE_ONCE_AT_START
+       * Lobby +/- is virtual. Create/remove synchronized bot PlayerState only
+       * once here, immediately before the existing authoritative role/start path.
+       */
+      this.setBotCount(this.configuredBotCount);
 
       /*
        * V1010364S_P0_MULTIPLAYER_STABILITY
@@ -5214,7 +5235,11 @@ this.sendPaintReadyState(client);
      */
     if (
       this.liveSessionIds.size +
-        this.botSessionIds.size >
+        (
+          this.state.phase === "lobby"
+            ? this.configuredBotCount
+            : this.botSessionIds.size
+        ) >
       this.maxClients
     ) {
       client.send(
@@ -5224,7 +5249,12 @@ this.sendPaintReadyState(client);
           playerCount:
             Math.min(
               this.maxClients,
-              this.liveSessionIds.size + this.botSessionIds.size,
+              this.liveSessionIds.size +
+                (
+                  this.state.phase === "lobby"
+                    ? this.configuredBotCount
+                    : this.botSessionIds.size
+                ),
             ),
           maxClients:
             this.maxClients,
@@ -7598,9 +7628,31 @@ this.sendPaintReadyState(client);
    * V1010565_BOTS_V1 - room-owned bot runtime
    * ==================================================================== */
   private setBotCount(desired: number): void {
-    const target = Math.max(0, Math.min(9, Math.floor(desired)));
-    while (this.botSessionIds.size < target) this.createBotSeat();
-    while (this.botSessionIds.size > target) this.removeLastBotSeat();
+    const target = Math.max(
+      0,
+      Math.min(
+        9,
+        Math.max(0, this.maxClients - this.liveSessionIds.size),
+        Math.floor(desired),
+      ),
+    );
+
+    /* V1010565B_BOT_LOBBY_RECONNECT_HOTFIX: hard progress guards make an accidental capacity mismatch non-blocking. */
+    let guard = 0;
+    while (this.botSessionIds.size < target && guard < 12) {
+      const before = this.botSessionIds.size;
+      this.createBotSeat();
+      guard += 1;
+      if (this.botSessionIds.size === before) break;
+    }
+
+    guard = 0;
+    while (this.botSessionIds.size > target && guard < 12) {
+      const before = this.botSessionIds.size;
+      this.removeLastBotSeat();
+      guard += 1;
+      if (this.botSessionIds.size === before) break;
+    }
   }
 
   private createBotSeat(): void {
@@ -7610,7 +7662,8 @@ this.sendPaintReadyState(client);
     ) return;
 
     this.botSequence += 1;
-    const sessionId = `bot:${this.roomId}:${this.botSequence}`;
+    /* V1010565B_BOT_LOBBY_RECONNECT_HOTFIX: conservative alphanumeric/underscore MapSchema key. */
+    const sessionId = `bot_${this.botSequence}_${Date.now().toString(36)}`;
     const player = new PlayerState();
     player.name = `BOT ${this.botSequence}`;
     player.role = "hider";
@@ -9059,6 +9112,10 @@ this.sendPaintReadyState(client);
     this.disposeEmptyLobbySoon();
   }
 
+  /*
+   * V1010565B_BOT_LOBBY_RECONNECT_HOTFIX: Lobby readiness includes configured virtual bots without creating
+   * any synchronized PlayerState on +/- clicks.
+   */
   private getLobbyReadyState(): {
     readySessionIds: string[];
     readyCount: number;
@@ -9080,16 +9137,34 @@ this.sendPaintReadyState(client);
             !this.supersededSessionIds.has(sessionId),
         );
 
-    /* Repair only REAL transport bookkeeping; bots never enter liveSessionIds. */
     for (const sessionId of humanConnectedSessionIds) {
       this.liveSessionIds.add(sessionId);
     }
 
-    const botIds = [...this.botSessionIds]
+    const allPhysicalBotIds = [...this.botSessionIds]
       .filter((sessionId) => this.state.players.has(sessionId));
+
+    const desiredLobbyBotCount =
+      this.state.phase === "lobby"
+        ? Math.max(0, Math.min(9, this.configuredBotCount))
+        : allPhysicalBotIds.length;
+
+    const physicalBotIds =
+      this.state.phase === "lobby"
+        ? allPhysicalBotIds.slice(0, desiredLobbyBotCount)
+        : allPhysicalBotIds;
+
+    const virtualBotIds = Array.from(
+      {
+        length: Math.max(0, desiredLobbyBotCount - physicalBotIds.length),
+      },
+      (_unused, index) => "__configured_bot_" + (index + 1),
+    );
+
     const connectedSessionIds = [
       ...humanConnectedSessionIds,
-      ...botIds,
+      ...physicalBotIds,
+      ...virtualBotIds,
     ];
     const connectedSet = new Set(connectedSessionIds);
 
@@ -9105,11 +9180,13 @@ this.sendPaintReadyState(client);
     const readySessionIds = eligibleReadyIds.filter(
       (sessionId) =>
         this.botSessionIds.has(sessionId) ||
+        sessionId.startsWith("__configured_bot_") ||
         this.lobbyReadySessionIds.has(sessionId),
     );
+
     const readyCount = readySessionIds.length;
     const totalCount = eligibleReadyIds.length;
-    const livePlayerCount = connectedSessionIds.length;
+    const livePlayerCount = humanConnectedSessionIds.length + desiredLobbyBotCount;
 
     const hasDisconnectedPlayers = [...this.state.players.keys()].some(
       (sessionId) =>
@@ -9117,6 +9194,7 @@ this.sendPaintReadyState(client);
         !this.botSessionIds.has(sessionId) &&
         !this.supersededSessionIds.has(sessionId),
     );
+
     const allReady = totalCount > 0 && readyCount === totalCount;
 
     return {
@@ -9483,7 +9561,11 @@ this.sendPaintReadyState(client);
         this.state.isPrivate,
       playerCount:
         this.liveSessionIds.size +
-        this.botSessionIds.size,
+        (
+          this.state.phase === "lobby"
+            ? this.configuredBotCount
+            : this.botSessionIds.size
+        ),
       maxClients:
         this.maxClients,
       phase:

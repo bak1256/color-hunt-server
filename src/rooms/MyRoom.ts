@@ -3413,8 +3413,13 @@ hunterStats.shotsFired += 1;
           )
           .every(
             ([sessionId]) =>
-              this.liveSessionIds.has(
-                sessionId,
+              (
+                this.liveSessionIds.has(
+                  sessionId,
+                ) ||
+                this.botSessionIds.has(
+                  sessionId,
+                )
               ) &&
               !this.supersededSessionIds.has(
                 sessionId,
@@ -7866,6 +7871,56 @@ this.sendPaintReadyState(client);
     };
   }
 
+  /*
+   * V1010565D_BOT_READY_EARLY_HUNT
+   * If no human Hunter exists, nobody can press the Hunter-only early-start
+   * button. Treat all-bot Hunters as consenting automatically, but ONLY after
+   * every alive Hider is READY and the existing Paint->Hunt safety barrier is
+   * satisfied. Bots still do not invoke skills/ultimates/taunts.
+   */
+  private tryAutoStartHuntForBotHunters(
+    now = Date.now(),
+  ): void {
+    if (this.state.phase !== "paint") return;
+
+    const aliveHunterIds =
+      [...this.state.players.entries()]
+        .filter(
+          ([, player]) =>
+            player.role === "hunter" &&
+            player.alive,
+        )
+        .map(([sessionId]) => sessionId);
+
+    if (
+      aliveHunterIds.length < 1 ||
+      !aliveHunterIds.every(
+        (sessionId) =>
+          this.botSessionIds.has(sessionId),
+      )
+    ) {
+      return;
+    }
+
+    const readyState =
+      this.getPaintReadyState();
+
+    if (
+      readyState.total < 1 ||
+      !readyState.allHidersReady ||
+      !this.canEnterHuntFromPaint(now)
+    ) {
+      return;
+    }
+
+    /* Match the existing human-Hunter early_start_hunt path: open the
+     * authoritative Paint deadline before entering startHuntPhase(). */
+    this.state.phaseEndsAt =
+      Date.now();
+
+    this.startHuntPhase();
+  }
+
   private tickBots(): void {
     if (this.botSessionIds.size < 1) return;
     const now = Date.now();
@@ -7886,6 +7941,9 @@ this.sendPaintReadyState(client);
         this.botPaintFallbackAt = Number.POSITIVE_INFINITY;
         if (fallbackApplied) this.broadcastPaintReadyState();
       }
+
+      /* V1010565D_BOT_READY_EARLY_HUNT: all-bot Hunter teams auto-accept an all-Hider READY state. */
+      this.tryAutoStartHuntForBotHunters(now);
       return;
     }
 

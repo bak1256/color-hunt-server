@@ -1,3 +1,4 @@
+/* V1010565Q3_HUNTER_DETECTION_RANGE_REBOUND: Hunter range/FOV rebound after over-nerf; slow movement + real-camouflage respect retained. */
 /* V1010565P_POST_ROUND_VIRTUAL_BOT_LOBBY_RESET: physical bots are dematerialized once on round->Lobby; configured Lobby bot seats stay virtual. */
 /* V1010564_REMOVE_FART_RAMPAGE_TEST_ONLY_SERVER: remove temporary direct Fart Rampage test endpoint; production Random Taunt remains. */
 /* V1010563_FART_RAMPAGE_HYPER_BOUNCE_REPEAT_TEST_SERVER: faster/wider sprint, mirrored wall bounce, 30Hz authority, repeated TEST restart. */
@@ -7989,37 +7990,40 @@ this.sendPaintReadyState(client);
      * Human Hunter production speed remains 125; bots never exceed it.
      */
     if (this.botDifficulty === "easy") return {
+      /* V1010565Q3_HUNTER_DETECTION_RANGE_REBOUND: old detection RANGE restored, but reactions stay forgiving. */
       speed: 85,
-      visionRange: 245,
-      reactionBaseMs: 1_650,
-      stealthPenaltyMs: 3_000,
-      memoryMs: 900,
-      aimErrorRad: 18 * Math.PI / 180,
-      turnRateRad: 1.0,
+      visionRange: 340,
+      reactionBaseMs: 1_550,
+      stealthPenaltyMs: 2_800,
+      memoryMs: 1_000,
+      aimErrorRad: 17 * Math.PI / 180,
+      turnRateRad: 1.1,
       hiderFidgetEveryMs: Number.POSITIVE_INFINITY,
       hiderFidgetDistance: 0,
       hiderMoveSpeed: 0,
     };
     if (this.botDifficulty === "hard") return {
+      /* V1010565Q3_HUNTER_DETECTION_RANGE_REBOUND: roughly old NORMAL perception, still slower than a human Hunter. */
       speed: 110,
-      visionRange: 350,
-      reactionBaseMs: 720,
-      stealthPenaltyMs: 1_850,
-      memoryMs: 2_700,
-      aimErrorRad: 7 * Math.PI / 180,
-      turnRateRad: 2.2,
+      visionRange: 427.5,
+      reactionBaseMs: 560,
+      stealthPenaltyMs: 1_250,
+      memoryMs: 3_400,
+      aimErrorRad: 6 * Math.PI / 180,
+      turnRateRad: 2.7,
       hiderFidgetEveryMs: Number.POSITIVE_INFINITY,
       hiderFidgetDistance: 0,
       hiderMoveSpeed: 0,
     };
     return {
+      /* V1010565Q3_HUNTER_DETECTION_RANGE_REBOUND: old NORMAL range, but detection remains below old NORMAL strength. */
       speed: 100,
-      visionRange: 300,
-      reactionBaseMs: 1_250,
-      stealthPenaltyMs: 2_450,
-      memoryMs: 1_550,
-      aimErrorRad: 13 * Math.PI / 180,
-      turnRateRad: 1.45,
+      visionRange: 427.5,
+      reactionBaseMs: 1_000,
+      stealthPenaltyMs: 2_000,
+      memoryMs: 2_200,
+      aimErrorRad: 10 * Math.PI / 180,
+      turnRateRad: 1.8,
       hiderFidgetEveryMs: Number.POSITIVE_INFINITY,
       hiderFidgetDistance: 0,
       hiderMoveSpeed: 0,
@@ -8337,7 +8341,8 @@ this.sendPaintReadyState(client);
     }
 
     /* V1010565Q_BOT_ROLE_BALANCE_REWORK: 60-degree base cone instead of 72. */
-    const baseHalfFov = 30 * Math.PI / 180;
+    /* V1010565Q3_HUNTER_DETECTION_RANGE_REBOUND: restore original 72-degree total base cone. */
+    const baseHalfFov = 36 * Math.PI / 180;
     const bodySafeRadius = 42;
 
     /* V1010565H_HARDENED_RAGE_LOCK / RAGE_LIFETIME: only death/removal ends the grudge. */
@@ -8450,13 +8455,13 @@ this.sendPaintReadyState(client);
        */
       const highCamouflageBonusMs =
         stealth > 0.62
-          ? ((stealth - 0.62) / 0.38) * cfg.stealthPenaltyMs * 0.55
+          ? ((stealth - 0.62) / 0.38) * cfg.stealthPenaltyMs * 0.18
           : 0;
       let threshold =
         cfg.reactionBaseMs +
         stealth * cfg.stealthPenaltyMs +
         highCamouflageBonusMs +
-        distanceFactor * 420;
+        distanceFactor * 360;
 
       if (rageCandidate) threshold = Math.min(threshold, 70);
       else if (taunting) threshold = Math.min(threshold, movingRecently ? 70 : 160);

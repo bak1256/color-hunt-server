@@ -822,6 +822,12 @@ export class MyRoom extends Room {
   private readonly botBrainBySessionId = new Map<string, BotBrain>();
   private readonly lastMoveAtBySessionId = new Map<string, number>();
 
+  /* V1010565J_BACKGROUND_CAMOUFLAGE_SCORE: Host-rendered paint-vs-map similarity, anchored to a sampled position. */
+  private readonly camouflageSimilarityBySessionId = new Map<
+    string,
+    { score: number; x: number; y: number; updatedAt: number }
+  >();
+
   /* V1010565I_BOT_ATTENTION_STIMULUS: short-lived server-authoritative "something happened there" breadcrumbs. */
   private readonly botAttentionStimuli: BotAttentionStimulus[] = [];
   private botAttentionStimulusSerial = 0;
@@ -945,6 +951,50 @@ export class MyRoom extends Room {
       if ((this.roundPaintStrokes.get(targetSessionId)?.length ?? 0) < 1) return;
       this.paintReadySessionIds.add(targetSessionId);
       this.broadcastPaintReadyState();
+    },
+
+    /*
+     * V1010565J_BACKGROUND_CAMOUFLAGE_SCORE: Host browser compares the final 80x120 Hider paint raster with
+     * the actual map pixels behind that Hider. The server accepts the compact
+     * score only from the current Host and only when the reported sample
+     * position is still close to authoritative PlayerState.
+     */
+    hider_camouflage_similarity: (
+      client: Client,
+      message: {
+        targetSessionId?: string;
+        score?: number;
+        sampleX?: number;
+        sampleY?: number;
+      },
+    ): void => {
+      if (
+        this.state.phase !== "hunt" ||
+        client.sessionId !== this.state.hostId
+      ) return;
+
+      const targetSessionId = String(message?.targetSessionId ?? "");
+      const target = this.state.players.get(targetSessionId);
+      if (!target || target.role !== "hider" || !target.alive) return;
+
+      const score = Number(message?.score);
+      const sampleX = Number(message?.sampleX);
+      const sampleY = Number(message?.sampleY);
+      if (
+        !Number.isFinite(score) ||
+        !Number.isFinite(sampleX) ||
+        !Number.isFinite(sampleY)
+      ) return;
+
+      /* A stale/made-up position must never give a moving Hider free stealth. */
+      if (Math.hypot(target.x - sampleX, target.y - sampleY) > 18) return;
+
+      this.camouflageSimilarityBySessionId.set(targetSessionId, {
+        score: Math.max(0, Math.min(1, score)),
+        x: sampleX,
+        y: sampleY,
+        updatedAt: Date.now(),
+      });
     },
 
     /*
@@ -8778,11 +8828,38 @@ this.sendPaintReadyState(client);
     }
     const coverage = Math.max(0, Math.min(1, pointCount / 850));
     const variety = Math.max(0, Math.min(1, colors.size / 12));
-    let stealth = coverage * 0.72 + variety * 0.18;
 
-    if (this.botSessionIds.has(sessionId)) {
-      stealth += this.botDifficulty === "hard" ? 0.10 : this.botDifficulty === "easy" ? -0.08 : 0.03;
+    const player = this.state.players.get(sessionId);
+    const visual = this.camouflageSimilarityBySessionId.get(sessionId);
+    const visualStillMatchesPosition = Boolean(
+      player &&
+      visual &&
+      Math.hypot(player.x - visual.x, player.y - visual.y) <= 14
+    );
+
+    let stealth: number;
+    if (visual && visualStillMatchesPosition) {
+      /*
+       * V1010565J_BACKGROUND_CAMOUFLAGE_SCORE / REAL_CAMOUFLAGE_DOMINATES
+       * Similar-looking paint is now the main factor. Coverage remains a
+       * smaller anti-cheese term; "many colors" is NOT rewarded because a
+       * rainbow is not camouflage on a plain wall.
+       * Max before difficulty/movement = 0.90, same envelope as old logic.
+       */
+      stealth = coverage * 0.16 + visual.score * 0.74;
+
+      if (this.botSessionIds.has(sessionId)) {
+        /* Bot paint quality already differs by difficulty; keep only a small nudge. */
+        stealth += this.botDifficulty === "hard" ? 0.04 : this.botDifficulty === "easy" ? -0.04 : 0.01;
+      }
+    } else {
+      /* Safe fallback for Host handoff / score not received yet. */
+      stealth = coverage * 0.72 + variety * 0.18;
+      if (this.botSessionIds.has(sessionId)) {
+        stealth += this.botDifficulty === "hard" ? 0.10 : this.botDifficulty === "easy" ? -0.08 : 0.03;
+      }
     }
+
     const lastMoveAt = this.lastMoveAtBySessionId.get(sessionId) ?? 0;
     if (now - lastMoveAt < 650) stealth -= 0.48;
     else if (now - lastMoveAt < 1_600) stealth -= 0.22;
@@ -9175,6 +9252,8 @@ this.sendPaintReadyState(client);
     /* V101069_READY_PAINT_START */
     /* V101082B_CLEAR_ROUND_PAINT */
     this.roundPaintStrokes.clear();
+    /* V1010565J_BACKGROUND_CAMOUFLAGE_SCORE: no visual similarity score may leak across rounds. */
+    this.camouflageSimilarityBySessionId.clear();
     /* V1010565_BOTS_V1: choose Hider-bot hiding spots before Host samples camouflage. */
     this.prepareBotsForPaint();
 

@@ -7833,6 +7833,7 @@ this.sendPaintReadyState(client);
     hiderFidgetDistance: number;
     hiderMoveSpeed: number;
   } {
+    /* V1010565E_BOT_AI_VISUAL_LOBBY_POLISH: human Hunter production speed is 125; difficulty must never grant movement cheats. */
     if (this.botDifficulty === "easy") return {
       speed: 125,
       visionRange: 340,
@@ -7841,33 +7842,33 @@ this.sendPaintReadyState(client);
       memoryMs: 1800,
       aimErrorRad: 12 * Math.PI / 180,
       turnRateRad: 1.5,
-      hiderFidgetEveryMs: 4_600,
-      hiderFidgetDistance: 34,
-      hiderMoveSpeed: 82,
+      hiderFidgetEveryMs: Number.POSITIVE_INFINITY,
+      hiderFidgetDistance: 0,
+      hiderMoveSpeed: 0,
     };
     if (this.botDifficulty === "hard") return {
-      speed: 215,
+      speed: 125,
       visionRange: 427.5,
       reactionBaseMs: 260,
       stealthPenaltyMs: 700,
-      memoryMs: 4_800,
+      memoryMs: 4800,
       aimErrorRad: 2.5 * Math.PI / 180,
       turnRateRad: 3.8,
-      hiderFidgetEveryMs: 60_000,
+      hiderFidgetEveryMs: Number.POSITIVE_INFINITY,
       hiderFidgetDistance: 0,
       hiderMoveSpeed: 0,
     };
     return {
-      speed: 175,
+      speed: 125,
       visionRange: 427.5,
-      reactionBaseMs: 620,
-      stealthPenaltyMs: 1350,
-      memoryMs: 3_200,
+      reactionBaseMs: 560,
+      stealthPenaltyMs: 1250,
+      memoryMs: 3400,
       aimErrorRad: 6 * Math.PI / 180,
-      turnRateRad: 2.5,
-      hiderFidgetEveryMs: 9_000,
-      hiderFidgetDistance: 17,
-      hiderMoveSpeed: 55,
+      turnRateRad: 2.7,
+      hiderFidgetEveryMs: Number.POSITIVE_INFINITY,
+      hiderFidgetDistance: 0,
+      hiderMoveSpeed: 0,
     };
   }
 
@@ -7957,29 +7958,9 @@ this.sendPaintReadyState(client);
     }
   }
 
-  private tickHiderBot(sessionId: string, player: PlayerState, now: number): void {
-    const cfg = this.getBotDifficultyConfig();
-    if (cfg.hiderFidgetDistance <= 0 || cfg.hiderMoveSpeed <= 0) return;
-    let brain = this.botBrainBySessionId.get(sessionId);
-    if (!brain) {
-      brain = this.makeBotBrain(player.x, player.y);
-      this.botBrainBySessionId.set(sessionId, brain);
-    }
-
-    if (brain.nextDecisionAt <= 0) {
-      brain.nextDecisionAt = now + cfg.hiderFidgetEveryMs * (0.75 + Math.random() * 0.5);
-    }
-    if (now >= brain.nextDecisionAt && now >= brain.modeUntil) {
-      const angle = Math.random() * Math.PI * 2;
-      const distance = cfg.hiderFidgetDistance * (0.55 + Math.random() * 0.75);
-      brain.patrolX = Math.max(28, Math.min(932, player.x + Math.cos(angle) * distance));
-      brain.patrolY = Math.max(44, Math.min(506, player.y + Math.sin(angle) * distance));
-      brain.modeUntil = now + 900 + Math.random() * 900;
-      brain.nextDecisionAt = now + cfg.hiderFidgetEveryMs * (0.8 + Math.random() * 0.5);
-    }
-    if (now < brain.modeUntil) {
-      this.moveBotToward(sessionId, player, brain, brain.patrolX, brain.patrolY, cfg.hiderMoveSpeed, 0.10);
-    }
+  private tickHiderBot(_sessionId: string, _player: PlayerState, _now: number): void {
+    /* V1010565E_BOT_AI_VISUAL_LOBBY_POLISH: Hider bots choose their hiding spot in prepareBotsForPaint() and stay there. */
+    return;
   }
 
   private tickHunterBot(sessionId: string, player: PlayerState, now: number): void {
@@ -7990,25 +7971,37 @@ this.sendPaintReadyState(client);
       this.botBrainBySessionId.set(sessionId, brain);
     }
 
-    const halfFov = 36 * Math.PI / 180;
+    const baseHalfFov = 36 * Math.PI / 180;
     const bodySafeRadius = 42;
+    const searchingAfterMiss = now < brain.modeUntil;
     let candidateId = "";
     let candidateDistance = Number.POSITIVE_INFINITY;
-    let candidateAngle = brain.heading;
 
-    for (const [targetId, target] of this.state.players) {
-      if (target.role !== "hider" || !target.alive) continue;
-      const dx = target.x - player.x;
-      const dy = target.y - player.y;
-      const distance = Math.hypot(dx, dy);
-      if (distance > cfg.visionRange) continue;
-      const angle = Math.atan2(dy, dx);
-      const diff = Math.abs(this.normalizeBotAngle(angle - brain.heading));
-      if (distance > bodySafeRadius && diff > halfFov) continue;
-      if (distance < candidateDistance) {
-        candidateId = targetId;
-        candidateDistance = distance;
-        candidateAngle = angle;
+    /* After a real fired miss, move/search briefly instead of instantly re-locking. */
+    if (!searchingAfterMiss) {
+      for (const [targetId, target] of this.state.players) {
+        if (target.role !== "hider" || !target.alive) continue;
+        const dx = target.x - player.x;
+        const dy = target.y - player.y;
+        const distance = Math.hypot(dx, dy);
+        const taunting = this.isHiderHardened(targetId);
+        const lastMoveAt = this.lastMoveAtBySessionId.get(targetId) ?? 0;
+        const movingRecently = now - lastMoveAt < 1200;
+        const attentionRange = cfg.visionRange * (taunting ? 1.10 : movingRecently ? 1.04 : 1);
+        if (distance > attentionRange) continue;
+        const angle = Math.atan2(dy, dx);
+        const attentionHalfFov = Math.min(
+          82 * Math.PI / 180,
+          baseHalfFov +
+            (movingRecently ? 14 * Math.PI / 180 : 0) +
+            (taunting ? 30 * Math.PI / 180 : 0),
+        );
+        const diff = Math.abs(this.normalizeBotAngle(angle - brain.heading));
+        if (distance > bodySafeRadius && diff > attentionHalfFov) continue;
+        if (distance < candidateDistance) {
+          candidateId = targetId;
+          candidateDistance = distance;
+        }
       }
     }
 
@@ -8017,12 +8010,21 @@ this.sendPaintReadyState(client);
         brain.candidateId = candidateId;
         brain.candidateSeenSince = now;
       }
+
+      const taunting = this.isHiderHardened(candidateId);
+      const lastMoveAt = this.lastMoveAtBySessionId.get(candidateId) ?? 0;
+      const movingRecently = now - lastMoveAt < 1200;
       const stealth = this.getCamouflageStealthScore(candidateId, now);
       const distanceFactor = Math.max(0, Math.min(1, candidateDistance / cfg.visionRange));
-      const threshold =
+      let threshold =
         cfg.reactionBaseMs +
         stealth * cfg.stealthPenaltyMs +
         distanceFactor * 360;
+
+      /* Taunting is intentionally risky; movement is also a strong visual cue. */
+      if (taunting) threshold = Math.min(threshold, movingRecently ? 70 : 160);
+      else if (movingRecently) threshold = Math.max(120, threshold * 0.42);
+
       if (now - brain.candidateSeenSince >= threshold) {
         const target = this.state.players.get(candidateId);
         if (target) {
@@ -8032,7 +8034,7 @@ this.sendPaintReadyState(client);
           brain.lastSeenAt = now;
         }
       }
-    } else {
+    } else if (!searchingAfterMiss) {
       brain.candidateId = "";
       brain.candidateSeenSince = 0;
     }
@@ -8042,7 +8044,7 @@ this.sendPaintReadyState(client);
     let targetVisible = false;
     let lockedTargetDistance = Number.POSITIVE_INFINITY;
 
-    if (brain.targetId) {
+    if (!searchingAfterMiss && brain.targetId) {
       const target = this.state.players.get(brain.targetId);
       if (!target || target.role !== "hider" || !target.alive) {
         brain.targetId = "";
@@ -8051,8 +8053,18 @@ this.sendPaintReadyState(client);
         const dy = target.y - player.y;
         const dist = Math.hypot(dx, dy);
         const angle = Math.atan2(dy, dx);
+        const taunting = this.isHiderHardened(brain.targetId);
+        const lastMoveAt = this.lastMoveAtBySessionId.get(brain.targetId) ?? 0;
+        const movingRecently = now - lastMoveAt < 1200;
+        const attentionHalfFov = Math.min(
+          82 * Math.PI / 180,
+          baseHalfFov +
+            (movingRecently ? 14 * Math.PI / 180 : 0) +
+            (taunting ? 30 * Math.PI / 180 : 0),
+        );
+        const attentionRange = cfg.visionRange * (taunting ? 1.10 : movingRecently ? 1.04 : 1);
         const diff = Math.abs(this.normalizeBotAngle(angle - brain.heading));
-        targetVisible = dist <= cfg.visionRange && (dist <= bodySafeRadius || diff <= halfFov);
+        targetVisible = dist <= attentionRange && (dist <= bodySafeRadius || diff <= attentionHalfFov);
         if (targetVisible) {
           brain.lastSeenX = target.x;
           brain.lastSeenY = target.y;
@@ -8069,12 +8081,20 @@ this.sendPaintReadyState(client);
       }
     }
 
-    if (!brain.targetId) {
+    if (!brain.targetId || searchingAfterMiss) {
       const toPatrol = Math.hypot(brain.patrolX - player.x, brain.patrolY - player.y);
-      if (toPatrol < 24 || now >= brain.nextDecisionAt) {
+      if (searchingAfterMiss) {
+        /* Keep moving around the last sighting during the miss-recovery window. */
+        if (toPatrol < 18) {
+          const a = Math.random() * Math.PI * 2;
+          const r = 42 + Math.random() * 58;
+          brain.patrolX = Math.max(28, Math.min(932, brain.lastSeenX + Math.cos(a) * r));
+          brain.patrolY = Math.max(44, Math.min(506, brain.lastSeenY + Math.sin(a) * r));
+        }
+      } else if (toPatrol < 24 || now >= brain.nextDecisionAt) {
         brain.patrolX = 45 + Math.random() * 870;
         brain.patrolY = 55 + Math.random() * 430;
-        brain.nextDecisionAt = now + 2_600 + Math.random() * 3_000;
+        brain.nextDecisionAt = now + 2200 + Math.random() * 2600;
       }
       targetX = brain.patrolX;
       targetY = brain.patrolY;
@@ -8094,6 +8114,7 @@ this.sendPaintReadyState(client);
     }
 
     if (
+      !searchingAfterMiss &&
       brain.targetId &&
       targetVisible &&
       lockedTargetDistance <= this.pelletRange * 0.96
@@ -8104,7 +8125,23 @@ this.sendPaintReadyState(client);
         const facingError = Math.abs(this.normalizeBotAngle(perfectAngle - brain.heading));
         if (facingError <= 10 * Math.PI / 180) {
           const error = (Math.random() * 2 - 1) * cfg.aimErrorRad;
-          this.fireBotHunterShot(sessionId, perfectAngle + error, now);
+          const shot = this.fireBotHunterShot(sessionId, perfectAngle + error, now);
+
+          if (shot.fired && !shot.hit) {
+            /* A miss/blocked shot is a stimulus to SEARCH, never an infinite turret state. */
+            brain.lastSeenX = target.x;
+            brain.lastSeenY = target.y;
+            brain.lastSeenAt = now;
+            brain.targetId = "";
+            brain.candidateId = "";
+            brain.candidateSeenSince = 0;
+            const a = perfectAngle + (Math.random() - 0.5) * Math.PI * 1.25;
+            const r = 48 + Math.random() * 72;
+            brain.patrolX = Math.max(28, Math.min(932, target.x + Math.cos(a) * r));
+            brain.patrolY = Math.max(44, Math.min(506, target.y + Math.sin(a) * r));
+            brain.modeUntil = now + 850 + Math.random() * 650;
+            brain.nextDecisionAt = brain.modeUntil + 350;
+          }
         }
       }
     }
@@ -8162,19 +8199,25 @@ this.sendPaintReadyState(client);
     return Math.max(0, Math.min(1, stealth));
   }
 
-  private fireBotHunterShot(sessionId: string, angle: number, now: number): void {
-    if (this.state.phase !== "hunt") return;
+  private fireBotHunterShot(
+    sessionId: string,
+    angle: number,
+    now: number,
+  ): { fired: boolean; hit: boolean } {
+    if (this.state.phase !== "hunt") return { fired: false, hit: false };
     if (this.state.phaseEndsAt > 0 && now >= this.state.phaseEndsAt) {
       this.finishGame("hiders");
-      return;
+      return { fired: false, hit: false };
     }
     const hunter = this.state.players.get(sessionId);
-    if (!hunter || hunter.role !== "hunter" || !hunter.alive) return;
+    if (!hunter || hunter.role !== "hunter" || !hunter.alive) {
+      return { fired: false, hit: false };
+    }
     const previousShot = this.lastShotAt.get(sessionId) ?? 0;
-    if (now - previousShot < this.shotCooldownMs) return;
+    if (now - previousShot < this.shotCooldownMs) return { fired: false, hit: false };
 
     const heatState = this.getUpdatedWeaponHeatState(sessionId, now);
-    if (now < heatState.overheatedUntil) return;
+    if (now < heatState.overheatedUntil) return { fired: false, hit: false };
     const hunterStats = this.getHunterRoundStats(sessionId);
     hunterStats.shotsFired += 1;
     heatState.heat = Math.min(100, heatState.heat + this.heatPerShot);
@@ -8247,6 +8290,8 @@ this.sendPaintReadyState(client);
     if (hitIds.size > 0 && this.getAliveHiderCount() === 0) {
       this.finishGame("hunters");
     }
+
+    return { fired: true, hit: hitIds.size > 0 };
   }
 
   private assignRoles(): void {

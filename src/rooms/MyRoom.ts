@@ -33,6 +33,7 @@
  * restore live-socket public listing + 8s Lobby reconnect window.
  */
 /* V1010450ZF_RECONNECT_LOOP_HOTFIX: revert preserved-seat listing / 90s host Lobby reservation. */
+/* V1010565_BOTS_V1: server-owned bots, bot-ready integration, limited-FOV Hunter AI. */
 import {
   Client,
   CloseCode,
@@ -135,6 +136,29 @@ type PaintStrokeMessage = {
   size?: number;
   shape?: BrushShape;
   points?: PaintPoint[];
+};
+
+type BotDifficulty = "easy" | "normal" | "hard";
+type BotSettingsMessage = {
+  botCount?: number;
+  botDifficulty?: BotDifficulty;
+};
+type BotPaintCompleteMessage = {
+  targetSessionId?: string;
+};
+type BotBrain = {
+  heading: number;
+  patrolX: number;
+  patrolY: number;
+  targetId: string;
+  candidateId: string;
+  candidateSeenSince: number;
+  lastSeenX: number;
+  lastSeenY: number;
+  lastSeenAt: number;
+  nextDecisionAt: number;
+  modeUntil: number;
+  lastAimBroadcastAt: number;
 };
 
 type Point = {
@@ -255,33 +279,19 @@ export class MyRoom extends Room {
   ): boolean {
     if (
       this.state.phase !== "paint" ||
-      !this.isPaintHuntTopologySettled(
-        now,
-      )
-    ) {
-      return false;
-    }
+      !this.isPaintHuntTopologySettled(now)
+    ) return false;
 
-    const roundHiderIds =
-      this.getRoundAliveHiderIds();
+    const roundHiderIds = this.getRoundAliveHiderIds();
+    if (roundHiderIds.length < 1) return false;
 
-    if (roundHiderIds.length < 1) {
-      return false;
-    }
-
-    /*
-     * A reconnect-reserved Hider remains in state.players, but MUST NOT allow
-     * Paint -> Hunt until its actual transport is live again (or existing
-     * disconnect-outcome logic resolves/removes it).
-     */
     return roundHiderIds.every(
       (sessionId) =>
-        this.liveSessionIds.has(
-          sessionId,
+        (
+          this.liveSessionIds.has(sessionId) ||
+          this.botSessionIds.has(sessionId)
         ) &&
-        !this.supersededSessionIds.has(
-          sessionId,
-        ),
+        !this.supersededSessionIds.has(sessionId),
     );
   }
 
@@ -718,6 +728,8 @@ export class MyRoom extends Room {
         paintDurationMs:
           this.paintDurationMs,
         huntDurationMs: this.huntDurationMs,
+        botCount: this.botSessionIds.size,
+        botDifficulty: this.botDifficulty,
         /* V101072_PHASE_RECOVERY_SNAPSHOT */
         phase:
           this.state.phase,
@@ -765,6 +777,14 @@ export class MyRoom extends Room {
   private readonly roundPaintStrokes =
     new Map<string, any[]>();
 
+  /* V1010565_BOTS_V1: bots are real room seats in state.players, but never transports/hosts. */
+  private readonly botSessionIds = new Set<string>();
+  private readonly botBrainBySessionId = new Map<string, BotBrain>();
+  private readonly lastMoveAtBySessionId = new Map<string, number>();
+  private botDifficulty: BotDifficulty = "normal";
+  private botSequence = 0;
+  private botPaintFallbackAt = 0;
+
   /*
    * V1010560_RECONNECT_STORM_PAINT_SNAPSHOT_BACKPRESSURE_SERVER / PER_SESSION_BACKPRESSURE
    * Full Paint snapshots can contain many thousands of points.
@@ -791,6 +811,79 @@ export class MyRoom extends Room {
     }> = [];
 
   messages = {
+
+    /* V1010565_BOTS_V1: only the live human Host can change lobby bot seats/difficulty. */
+    bot_settings: (
+      client: Client,
+      message: BotSettingsMessage,
+    ): void => {
+      if (
+        this.state.phase !== "lobby" ||
+        client.sessionId !== this.state.hostId
+      ) return;
+
+      const requestedDifficulty = String(message?.botDifficulty ?? "").toLowerCase();
+      if (
+        requestedDifficulty === "easy" ||
+        requestedDifficulty === "normal" ||
+        requestedDifficulty === "hard"
+      ) {
+        this.botDifficulty = requestedDifficulty;
+      }
+
+      if (message?.botCount !== undefined) {
+        const requested = Number(message.botCount);
+        if (Number.isFinite(requested)) {
+          const humanSeatCount = this.liveSessionIds.size;
+          const maxBots = Math.max(0, this.maxClients - humanSeatCount);
+          this.setBotCount(Math.max(0, Math.min(maxBots, Math.floor(requested))));
+        }
+      }
+
+      this.updateRoomMetadata();
+      this.broadcastLobbyReadyState();
+      this.clients.forEach((connectedClient) => this.sendLobbySnapshot(connectedClient));
+    },
+
+    /* Host browser samples the REAL rendered map behind each Hider bot. */
+    bot_paint_stroke: (
+      client: Client,
+      message: PaintStrokeMessage,
+    ): void => {
+      if (
+        this.state.phase !== "paint" ||
+        client.sessionId !== this.state.hostId
+      ) return;
+
+      const targetSessionId = String(message?.targetSessionId ?? "");
+      const target = this.state.players.get(targetSessionId);
+      if (
+        !this.botSessionIds.has(targetSessionId) ||
+        !target ||
+        target.role !== "hider" ||
+        !target.alive
+      ) return;
+
+      this.storeBotPaintStroke(targetSessionId, message);
+    },
+
+    bot_paint_complete: (
+      client: Client,
+      message: BotPaintCompleteMessage,
+    ): void => {
+      if (
+        this.state.phase !== "paint" ||
+        client.sessionId !== this.state.hostId
+      ) return;
+      const targetSessionId = String(message?.targetSessionId ?? "");
+      if (!this.botSessionIds.has(targetSessionId)) return;
+      const target = this.state.players.get(targetSessionId);
+      if (!target || target.role !== "hider" || !target.alive) return;
+      if ((this.roundPaintStrokes.get(targetSessionId)?.length ?? 0) < 1) return;
+      this.paintReadySessionIds.add(targetSessionId);
+      this.broadcastPaintReadyState();
+    },
+
     /*
      * V1010451M5S_SERVER_INTENTIONAL_LOBBY_LEAVE_GHOST_FIX_ROOT_ROBUST / LEAVE_INTENT
      */
@@ -1582,6 +1675,7 @@ export class MyRoom extends Room {
         0,
         Math.min(540, y),
       );
+      this.lastMoveAtBySessionId.set(client.sessionId, Date.now());
     },
 
     hunter_volunteer: (
@@ -1742,7 +1836,10 @@ export class MyRoom extends Room {
        * A browser that was simply closed must never count toward a new round.
        */
       const liveLobbyPlayerIds =
-        [...this.liveSessionIds]
+        [...new Set([
+          ...this.liveSessionIds,
+          ...this.botSessionIds,
+        ])]
           .filter(
             (sessionId) =>
               this.state.players.has(
@@ -4949,6 +5046,7 @@ this.sendPaintReadyState(client);
       () => {
         this.checkPhaseDeadline();
         this.updateFartSkillSystem();
+        this.tickBots();
 
         /*
          * V1010364S_P0_MULTIPLAYER_STABILITY
@@ -5115,7 +5213,8 @@ this.sendPaintReadyState(client);
      * onJoin(), it is rejected before PlayerState creation.
      */
     if (
-      this.liveSessionIds.size >
+      this.liveSessionIds.size +
+        this.botSessionIds.size >
       this.maxClients
     ) {
       client.send(
@@ -5123,7 +5222,10 @@ this.sendPaintReadyState(client);
         {
           reason: "room_full",
           playerCount:
-            this.maxClients,
+            Math.min(
+              this.maxClients,
+              this.liveSessionIds.size + this.botSessionIds.size,
+            ),
           maxClients:
             this.maxClients,
           returnToLobby: true,
@@ -6128,31 +6230,30 @@ this.sendPaintReadyState(client);
     role: "hunter" | "hider",
   ): number {
     let count = 0;
-
-    for (
-      const sessionId of
-      this.liveSessionIds
-    ) {
-      const player =
-        this.state.players.get(
-          sessionId,
-        );
-
+    const activeIds = new Set<string>([
+      ...this.liveSessionIds,
+      ...this.botSessionIds,
+    ]);
+    for (const sessionId of activeIds) {
+      const player = this.state.players.get(sessionId);
       if (
         player &&
         player.role === role &&
-        (
-          role === "hunter" ||
-          player.alive
-        )
-      ) {
-        count += 1;
-      }
+        (role === "hunter" || player.alive)
+      ) count += 1;
     }
-
     return count;
   }
 
+  /*
+   * V1010565A_RESTORE_DISCONNECT_HELPERS
+   *
+   * v565 replaced countLiveRole() through the next method anchor and
+   * accidentally removed these existing disconnect-outcome helpers.
+   * Restore them verbatim in behavior. countLiveRole() itself stays the
+   * v565 bot-aware implementation, so server-owned bots count as connected
+   * roles and never trigger false all-role-disconnected outcomes.
+   */
   private broadcastRoleDisconnectCountdown(
     role: "hunter" | "hider",
     remaining: number,
@@ -6233,11 +6334,6 @@ this.sendPaintReadyState(client);
             }
 
             if (remaining <= 0) {
-              /*
-               * No live Hunter returned within 10 sec silent grace + 5 sec
-               * visible countdown. Preserve session identity separately, but
-               * end this round cleanly so everybody else is never trapped.
-               */
               this.finishGame(
                 "hiders",
                 "timeout",
@@ -6325,11 +6421,6 @@ this.sendPaintReadyState(client);
             }
 
             if (remaining <= 0) {
-              /*
-               * Every still-alive Hider is offline after the full grace.
-               * Mark those offline Hiders eliminated before finishGame so its
-               * finalAliveHiderCount authority resolves to Hunters.
-               */
               for (
                 const [
                   sessionId,
@@ -6340,6 +6431,9 @@ this.sendPaintReadyState(client);
                   player.role !== "hider" ||
                   !player.alive ||
                   this.liveSessionIds.has(
+                    sessionId,
+                  ) ||
+                  this.botSessionIds.has(
                     sessionId,
                   )
                 ) {
@@ -6385,6 +6479,10 @@ this.sendPaintReadyState(client);
   private scheduleDisconnectedHiderElimination(
     sessionId: string,
   ): void {
+    if (this.botSessionIds.has(sessionId)) {
+      return;
+    }
+
     const player =
       this.state.players.get(
         sessionId,
@@ -6420,6 +6518,9 @@ this.sendPaintReadyState(client);
         if (
           !this.isDisconnectOutcomePhase() ||
           this.liveSessionIds.has(
+            sessionId,
+          ) ||
+          this.botSessionIds.has(
             sessionId,
           ) ||
           this.hiderDisconnectGenerationBySessionId.get(
@@ -7492,6 +7593,551 @@ this.sendPaintReadyState(client);
     );
   }
 
+
+  /* ======================================================================
+   * V1010565_BOTS_V1 - room-owned bot runtime
+   * ==================================================================== */
+  private setBotCount(desired: number): void {
+    const target = Math.max(0, Math.min(9, Math.floor(desired)));
+    while (this.botSessionIds.size < target) this.createBotSeat();
+    while (this.botSessionIds.size > target) this.removeLastBotSeat();
+  }
+
+  private createBotSeat(): void {
+    if (
+      this.state.phase !== "lobby" ||
+      this.liveSessionIds.size + this.botSessionIds.size >= this.maxClients
+    ) return;
+
+    this.botSequence += 1;
+    const sessionId = `bot:${this.roomId}:${this.botSequence}`;
+    const player = new PlayerState();
+    player.name = `BOT ${this.botSequence}`;
+    player.role = "hider";
+    player.hunterVolunteer = false;
+    player.alive = true;
+    const pos = this.getRandomLobbyPosition();
+    player.x = pos.x;
+    player.y = pos.y;
+    this.state.players.set(sessionId, player);
+    this.botSessionIds.add(sessionId);
+    this.botBrainBySessionId.set(sessionId, this.makeBotBrain(player.x, player.y));
+  }
+
+  private removeLastBotSeat(): void {
+    if (this.state.phase !== "lobby") return;
+    const sessionId = [...this.botSessionIds].pop();
+    if (!sessionId) return;
+    this.botSessionIds.delete(sessionId);
+    this.botBrainBySessionId.delete(sessionId);
+    this.lastMoveAtBySessionId.delete(sessionId);
+    this.paintReadySessionIds.delete(sessionId);
+    this.lobbyReadySessionIds.delete(sessionId);
+    this.roundPaintStrokes.delete(sessionId);
+    this.lobbyAvatarPresets.delete(sessionId);
+    this.lastShotAt.delete(sessionId);
+    this.weaponHeatStates.delete(sessionId);
+    this.hunterRoundStats.delete(sessionId);
+    this.state.players.delete(sessionId);
+  }
+
+  private makeBotBrain(x: number, y: number): BotBrain {
+    return {
+      heading: Math.random() * Math.PI * 2,
+      patrolX: x,
+      patrolY: y,
+      targetId: "",
+      candidateId: "",
+      candidateSeenSince: 0,
+      lastSeenX: x,
+      lastSeenY: y,
+      lastSeenAt: 0,
+      nextDecisionAt: 0,
+      modeUntil: 0,
+      lastAimBroadcastAt: 0,
+    };
+  }
+
+  private prepareBotsForPaint(): void {
+    this.botPaintFallbackAt = Date.now() + 8_000;
+    for (const sessionId of this.botSessionIds) {
+      const player = this.state.players.get(sessionId);
+      if (!player) continue;
+      const brain = this.makeBotBrain(player.x, player.y);
+      this.botBrainBySessionId.set(sessionId, brain);
+      this.paintReadySessionIds.delete(sessionId);
+      if (player.role === "hider") {
+        /* Stable hiding position BEFORE Host samples the real background. */
+        player.x = 72 + Math.random() * 816;
+        player.y = 82 + Math.random() * 376;
+        brain.patrolX = player.x;
+        brain.patrolY = player.y;
+        this.lastMoveAtBySessionId.set(sessionId, Date.now());
+      }
+    }
+  }
+
+  private storeBotPaintStroke(
+    targetSessionId: string,
+    message: PaintStrokeMessage,
+  ): void {
+    const color = Number(message.color);
+    const size = Number(message.size);
+    const shape = message.shape === "dotCircle" ? "dotCircle" : "circle";
+    if (
+      !Number.isInteger(color) || color < 0 || color > 0xffffff ||
+      !Number.isFinite(size) || size < 1 || size > 20 ||
+      !Array.isArray(message.points)
+    ) return;
+
+    const points = message.points.slice(0, 300)
+      .map((point) => ({ x: Number(point.x), y: Number(point.y) }))
+      .filter((point) =>
+        Number.isFinite(point.x) && Number.isFinite(point.y) &&
+        point.x >= 0 && point.x <= 80 && point.y >= 0 && point.y <= 120
+      );
+    if (points.length < 1) return;
+
+    const storedStroke = {
+      senderId: targetSessionId,
+      targetSessionId,
+      color,
+      size,
+      shape,
+      points,
+    };
+    const history = this.roundPaintStrokes.get(targetSessionId) ?? [];
+    history.push(storedStroke);
+    if (history.length > 2400) history.splice(0, history.length - 2400);
+    this.roundPaintStrokes.set(targetSessionId, history);
+    this.broadcast("paint_stroke", storedStroke);
+  }
+
+  private generateFallbackBotPaint(targetSessionId: string): void {
+    const player = this.state.players.get(targetSessionId);
+    if (!player || player.role !== "hider" || !player.alive) return;
+
+    /* Fallback is intentionally organic/round too; it never reintroduces mosaic squares. */
+    const families = [
+      [0x6f8f64, 0x92a875, 0x5f7757, 0xb4b989],
+      [0x8b775e, 0xa88e6c, 0x6f6559, 0xc1aa82],
+      [0x6b8792, 0x8ca6ad, 0x55727e, 0x9bb9b2],
+      [0x8d797e, 0xaaa09b, 0x6f666c, 0xc0af9c],
+    ];
+    let mapHash = 0;
+    for (const ch of String(this.state.activeMap)) mapHash = (mapHash * 33 + ch.charCodeAt(0)) >>> 0;
+    const palette = families[mapHash % families.length];
+    const cfg = this.botDifficulty === "easy"
+      ? { step: 5, size: 12 }
+      : this.botDifficulty === "hard"
+        ? { step: 2, size: 6 }
+        : { step: 3, size: 8 };
+    const buckets = new Map<string, any[]>();
+    for (let y = 2; y <= 118; y += cfg.step) {
+      const wave = Math.sin((y + mapHash % 17) * 0.21) * 1.4;
+      for (let x = 2; x <= 78; x += cfg.step) {
+        const h = (Math.imul(x + 17, 73856093) ^ Math.imul(y + 31, 19349663) ^ mapHash) >>> 0;
+        const color = palette[h % palette.length];
+        const size = Math.max(4, cfg.size + Number((h >>> 7) % 3) - 1);
+        const key = `${color}:${size}`;
+        const arr = buckets.get(key) ?? [];
+        arr.push({
+          x: Math.max(0, Math.min(80, x + wave + (((h >>> 10) & 3) - 1.5))),
+          y: Math.max(0, Math.min(120, y + (((h >>> 14) & 3) - 1.5))),
+        });
+        buckets.set(key, arr);
+      }
+    }
+    for (const [key, points] of buckets) {
+      const [colorText, sizeText] = key.split(":");
+      for (let cursor = 0; cursor < points.length; cursor += 220) {
+        this.storeBotPaintStroke(targetSessionId, {
+          targetSessionId,
+          color: Number(colorText),
+          size: Number(sizeText),
+          shape: "circle",
+          points: points.slice(cursor, cursor + 220),
+        });
+      }
+    }
+    this.paintReadySessionIds.add(targetSessionId);
+  }
+
+  private getBotDifficultyConfig(): {
+    speed: number;
+    visionRange: number;
+    reactionBaseMs: number;
+    stealthPenaltyMs: number;
+    memoryMs: number;
+    aimErrorRad: number;
+    turnRateRad: number;
+    hiderFidgetEveryMs: number;
+    hiderFidgetDistance: number;
+    hiderMoveSpeed: number;
+  } {
+    if (this.botDifficulty === "easy") return {
+      speed: 125,
+      visionRange: 340,
+      reactionBaseMs: 1150,
+      stealthPenaltyMs: 2100,
+      memoryMs: 1800,
+      aimErrorRad: 12 * Math.PI / 180,
+      turnRateRad: 1.5,
+      hiderFidgetEveryMs: 4_600,
+      hiderFidgetDistance: 34,
+      hiderMoveSpeed: 82,
+    };
+    if (this.botDifficulty === "hard") return {
+      speed: 215,
+      visionRange: 427.5,
+      reactionBaseMs: 260,
+      stealthPenaltyMs: 700,
+      memoryMs: 4_800,
+      aimErrorRad: 2.5 * Math.PI / 180,
+      turnRateRad: 3.8,
+      hiderFidgetEveryMs: 60_000,
+      hiderFidgetDistance: 0,
+      hiderMoveSpeed: 0,
+    };
+    return {
+      speed: 175,
+      visionRange: 427.5,
+      reactionBaseMs: 620,
+      stealthPenaltyMs: 1350,
+      memoryMs: 3_200,
+      aimErrorRad: 6 * Math.PI / 180,
+      turnRateRad: 2.5,
+      hiderFidgetEveryMs: 9_000,
+      hiderFidgetDistance: 17,
+      hiderMoveSpeed: 55,
+    };
+  }
+
+  private tickBots(): void {
+    if (this.botSessionIds.size < 1) return;
+    const now = Date.now();
+
+    if (this.state.phase === "paint") {
+      if (this.botPaintFallbackAt > 0 && now >= this.botPaintFallbackAt) {
+        let fallbackApplied = false;
+        for (const sessionId of this.botSessionIds) {
+          const player = this.state.players.get(sessionId);
+          if (
+            player?.role === "hider" && player.alive &&
+            !this.paintReadySessionIds.has(sessionId)
+          ) {
+            this.generateFallbackBotPaint(sessionId);
+            fallbackApplied = true;
+          }
+        }
+        this.botPaintFallbackAt = Number.POSITIVE_INFINITY;
+        if (fallbackApplied) this.broadcastPaintReadyState();
+      }
+      return;
+    }
+
+    if (this.state.phase !== "hunt") return;
+
+    for (const sessionId of this.botSessionIds) {
+      const player = this.state.players.get(sessionId);
+      if (!player || !player.alive) continue;
+      if (player.role === "hunter") this.tickHunterBot(sessionId, player, now);
+      else this.tickHiderBot(sessionId, player, now);
+    }
+  }
+
+  private tickHiderBot(sessionId: string, player: PlayerState, now: number): void {
+    const cfg = this.getBotDifficultyConfig();
+    if (cfg.hiderFidgetDistance <= 0 || cfg.hiderMoveSpeed <= 0) return;
+    let brain = this.botBrainBySessionId.get(sessionId);
+    if (!brain) {
+      brain = this.makeBotBrain(player.x, player.y);
+      this.botBrainBySessionId.set(sessionId, brain);
+    }
+
+    if (brain.nextDecisionAt <= 0) {
+      brain.nextDecisionAt = now + cfg.hiderFidgetEveryMs * (0.75 + Math.random() * 0.5);
+    }
+    if (now >= brain.nextDecisionAt && now >= brain.modeUntil) {
+      const angle = Math.random() * Math.PI * 2;
+      const distance = cfg.hiderFidgetDistance * (0.55 + Math.random() * 0.75);
+      brain.patrolX = Math.max(28, Math.min(932, player.x + Math.cos(angle) * distance));
+      brain.patrolY = Math.max(44, Math.min(506, player.y + Math.sin(angle) * distance));
+      brain.modeUntil = now + 900 + Math.random() * 900;
+      brain.nextDecisionAt = now + cfg.hiderFidgetEveryMs * (0.8 + Math.random() * 0.5);
+    }
+    if (now < brain.modeUntil) {
+      this.moveBotToward(sessionId, player, brain, brain.patrolX, brain.patrolY, cfg.hiderMoveSpeed, 0.10);
+    }
+  }
+
+  private tickHunterBot(sessionId: string, player: PlayerState, now: number): void {
+    const cfg = this.getBotDifficultyConfig();
+    let brain = this.botBrainBySessionId.get(sessionId);
+    if (!brain) {
+      brain = this.makeBotBrain(player.x, player.y);
+      this.botBrainBySessionId.set(sessionId, brain);
+    }
+
+    const halfFov = 36 * Math.PI / 180;
+    const bodySafeRadius = 42;
+    let candidateId = "";
+    let candidateDistance = Number.POSITIVE_INFINITY;
+    let candidateAngle = brain.heading;
+
+    for (const [targetId, target] of this.state.players) {
+      if (target.role !== "hider" || !target.alive) continue;
+      const dx = target.x - player.x;
+      const dy = target.y - player.y;
+      const distance = Math.hypot(dx, dy);
+      if (distance > cfg.visionRange) continue;
+      const angle = Math.atan2(dy, dx);
+      const diff = Math.abs(this.normalizeBotAngle(angle - brain.heading));
+      if (distance > bodySafeRadius && diff > halfFov) continue;
+      if (distance < candidateDistance) {
+        candidateId = targetId;
+        candidateDistance = distance;
+        candidateAngle = angle;
+      }
+    }
+
+    if (candidateId) {
+      if (brain.candidateId !== candidateId) {
+        brain.candidateId = candidateId;
+        brain.candidateSeenSince = now;
+      }
+      const stealth = this.getCamouflageStealthScore(candidateId, now);
+      const distanceFactor = Math.max(0, Math.min(1, candidateDistance / cfg.visionRange));
+      const threshold =
+        cfg.reactionBaseMs +
+        stealth * cfg.stealthPenaltyMs +
+        distanceFactor * 360;
+      if (now - brain.candidateSeenSince >= threshold) {
+        const target = this.state.players.get(candidateId);
+        if (target) {
+          brain.targetId = candidateId;
+          brain.lastSeenX = target.x;
+          brain.lastSeenY = target.y;
+          brain.lastSeenAt = now;
+        }
+      }
+    } else {
+      brain.candidateId = "";
+      brain.candidateSeenSince = 0;
+    }
+
+    let targetX = brain.patrolX;
+    let targetY = brain.patrolY;
+    let targetVisible = false;
+    let lockedTargetDistance = Number.POSITIVE_INFINITY;
+
+    if (brain.targetId) {
+      const target = this.state.players.get(brain.targetId);
+      if (!target || target.role !== "hider" || !target.alive) {
+        brain.targetId = "";
+      } else {
+        const dx = target.x - player.x;
+        const dy = target.y - player.y;
+        const dist = Math.hypot(dx, dy);
+        const angle = Math.atan2(dy, dx);
+        const diff = Math.abs(this.normalizeBotAngle(angle - brain.heading));
+        targetVisible = dist <= cfg.visionRange && (dist <= bodySafeRadius || diff <= halfFov);
+        if (targetVisible) {
+          brain.lastSeenX = target.x;
+          brain.lastSeenY = target.y;
+          brain.lastSeenAt = now;
+          targetX = target.x;
+          targetY = target.y;
+          lockedTargetDistance = dist;
+        } else if (now - brain.lastSeenAt <= cfg.memoryMs) {
+          targetX = brain.lastSeenX;
+          targetY = brain.lastSeenY;
+        } else {
+          brain.targetId = "";
+        }
+      }
+    }
+
+    if (!brain.targetId) {
+      const toPatrol = Math.hypot(brain.patrolX - player.x, brain.patrolY - player.y);
+      if (toPatrol < 24 || now >= brain.nextDecisionAt) {
+        brain.patrolX = 45 + Math.random() * 870;
+        brain.patrolY = 55 + Math.random() * 430;
+        brain.nextDecisionAt = now + 2_600 + Math.random() * 3_000;
+      }
+      targetX = brain.patrolX;
+      targetY = brain.patrolY;
+    }
+
+    const desiredHeading = Math.atan2(targetY - player.y, targetX - player.x);
+    brain.heading = this.turnBotAngleToward(brain.heading, desiredHeading, cfg.turnRateRad * 0.10);
+    this.moveBotToward(sessionId, player, brain, targetX, targetY, cfg.speed, 0.10);
+
+    if (now - brain.lastAimBroadcastAt >= 140) {
+      brain.lastAimBroadcastAt = now;
+      this.broadcast("hunter_aim", {
+        sessionId,
+        angle: brain.heading,
+        range: this.pelletRange,
+      });
+    }
+
+    if (
+      brain.targetId &&
+      targetVisible &&
+      lockedTargetDistance <= this.pelletRange * 0.96
+    ) {
+      const target = this.state.players.get(brain.targetId);
+      if (target) {
+        const perfectAngle = Math.atan2(target.y - player.y, target.x - player.x);
+        const facingError = Math.abs(this.normalizeBotAngle(perfectAngle - brain.heading));
+        if (facingError <= 10 * Math.PI / 180) {
+          const error = (Math.random() * 2 - 1) * cfg.aimErrorRad;
+          this.fireBotHunterShot(sessionId, perfectAngle + error, now);
+        }
+      }
+    }
+  }
+
+  private moveBotToward(
+    sessionId: string,
+    player: PlayerState,
+    brain: BotBrain,
+    targetX: number,
+    targetY: number,
+    speed: number,
+    dt: number,
+  ): void {
+    const dx = targetX - player.x;
+    const dy = targetY - player.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < 1 || speed <= 0) return;
+    const step = Math.min(distance, speed * dt);
+    player.x = Math.max(24, Math.min(936, player.x + dx / distance * step));
+    player.y = Math.max(42, Math.min(510, player.y + dy / distance * step));
+    this.lastMoveAtBySessionId.set(sessionId, Date.now());
+  }
+
+  private normalizeBotAngle(angle: number): number {
+    while (angle > Math.PI) angle -= Math.PI * 2;
+    while (angle < -Math.PI) angle += Math.PI * 2;
+    return angle;
+  }
+
+  private turnBotAngleToward(current: number, target: number, maxDelta: number): number {
+    const delta = this.normalizeBotAngle(target - current);
+    if (Math.abs(delta) <= maxDelta) return target;
+    return this.normalizeBotAngle(current + Math.sign(delta) * maxDelta);
+  }
+
+  private getCamouflageStealthScore(sessionId: string, now: number): number {
+    const strokes = this.roundPaintStrokes.get(sessionId) ?? [];
+    let pointCount = 0;
+    const colors = new Set<number>();
+    for (const stroke of strokes) {
+      pointCount += Array.isArray(stroke?.points) ? stroke.points.length : 0;
+      if (Number.isInteger(stroke?.color)) colors.add(stroke.color);
+    }
+    const coverage = Math.max(0, Math.min(1, pointCount / 850));
+    const variety = Math.max(0, Math.min(1, colors.size / 12));
+    let stealth = coverage * 0.72 + variety * 0.18;
+
+    if (this.botSessionIds.has(sessionId)) {
+      stealth += this.botDifficulty === "hard" ? 0.10 : this.botDifficulty === "easy" ? -0.08 : 0.03;
+    }
+    const lastMoveAt = this.lastMoveAtBySessionId.get(sessionId) ?? 0;
+    if (now - lastMoveAt < 650) stealth -= 0.48;
+    else if (now - lastMoveAt < 1_600) stealth -= 0.22;
+    return Math.max(0, Math.min(1, stealth));
+  }
+
+  private fireBotHunterShot(sessionId: string, angle: number, now: number): void {
+    if (this.state.phase !== "hunt") return;
+    if (this.state.phaseEndsAt > 0 && now >= this.state.phaseEndsAt) {
+      this.finishGame("hiders");
+      return;
+    }
+    const hunter = this.state.players.get(sessionId);
+    if (!hunter || hunter.role !== "hunter" || !hunter.alive) return;
+    const previousShot = this.lastShotAt.get(sessionId) ?? 0;
+    if (now - previousShot < this.shotCooldownMs) return;
+
+    const heatState = this.getUpdatedWeaponHeatState(sessionId, now);
+    if (now < heatState.overheatedUntil) return;
+    const hunterStats = this.getHunterRoundStats(sessionId);
+    hunterStats.shotsFired += 1;
+    heatState.heat = Math.min(100, heatState.heat + this.heatPerShot);
+    if (heatState.heat >= 100) heatState.overheatedUntil = now + this.overheatDurationMs;
+    heatState.updatedAt = now;
+    this.weaponHeatStates.set(sessionId, heatState);
+    this.lastShotAt.set(sessionId, now);
+
+    const startX = hunter.x + Math.cos(angle) * 28;
+    const startY = hunter.y + Math.sin(angle) * 28;
+    const pellets: Array<{ endX: number; endY: number }> = [];
+    const hitIds = new Set<string>();
+    const hardenedBlockedIds = new Set<string>();
+
+    for (let index = 0; index < this.pelletCount; index += 1) {
+      const ratio = this.pelletCount <= 1 ? 0.5 : index / (this.pelletCount - 1);
+      const pelletAngle = angle - this.pelletSpread / 2 + this.pelletSpread * ratio;
+      const endX = startX + Math.cos(pelletAngle) * this.pelletRange;
+      const endY = startY + Math.sin(pelletAngle) * this.pelletRange;
+      pellets.push({ endX, endY });
+
+      for (const [targetId, target] of this.state.players) {
+        if (target.role !== "hider" || !target.alive || hitIds.has(targetId)) continue;
+        const hit = this.distancePointToSegment(
+          target.x, target.y, startX, startY, endX, endY,
+        ) <= 18;
+        if (!hit) continue;
+        if (this.isHiderHardened(targetId)) {
+          if (!hardenedBlockedIds.has(targetId)) {
+            hardenedBlockedIds.add(targetId);
+            this.broadcastHardenedHit(targetId, target.x, target.y);
+          }
+          continue;
+        }
+        hitIds.add(targetId);
+      }
+    }
+
+    for (const hitId of hitIds) {
+      const target = this.state.players.get(hitId);
+      if (!target || target.role !== "hider" || !target.alive) continue;
+      if (!this.victoryFoundHiders.some((entry) => entry.sessionId === hitId)) {
+        this.victoryFoundHiders.push({
+          sessionId: hitId,
+          name: String(target.name ?? "Hider").slice(0, 32),
+          x: target.x,
+          y: target.y,
+          foundOrder: this.victoryFoundHiders.length + 1,
+          foundAt: now,
+          foundByHunterSessionId: sessionId,
+          foundByHunterClientKey: sessionId,
+        });
+      }
+      target.alive = false;
+    }
+
+    const precisionReward = hitIds.size > 0 ? hitIds.size * 100 : 0;
+    hunterStats.precisionPoints += precisionReward;
+    this.broadcast("shot_fired", {
+      shooterId: sessionId,
+      startX,
+      startY,
+      pellets,
+      hitIds: [...hitIds],
+      precisionReward,
+      reserve: hunterStats.reserve,
+      precisionPoints: hunterStats.precisionPoints,
+    });
+
+    if (hitIds.size > 0 && this.getAliveHiderCount() === 0) {
+      this.finishGame("hunters");
+    }
+  }
+
   private assignRoles(): void {
     const entries =
       [...this.state.players.entries()];
@@ -7783,6 +8429,8 @@ this.sendPaintReadyState(client);
     /* V101069_READY_PAINT_START */
     /* V101082B_CLEAR_ROUND_PAINT */
     this.roundPaintStrokes.clear();
+    /* V1010565_BOTS_V1: choose Hider-bot hiding spots before Host samples camouflage. */
+    this.prepareBotsForPaint();
 
     /*
      * V1010388_SERVER_VICTORY_SHOWCASE: every Paint phase starts a brand-new victory timeline.
@@ -8278,9 +8926,8 @@ this.sendPaintReadyState(client);
       [...this.state.players.keys()]
     ) {
       if (
-        this.liveSessionIds.has(
-          sessionId,
-        )
+        this.liveSessionIds.has(sessionId) ||
+        this.botSessionIds.has(sessionId)
       ) {
         continue;
       }
@@ -8423,16 +9070,9 @@ this.sendPaintReadyState(client);
   } {
     this.ensureValidHost();
 
-    /*
-     * V1010451C_RESTORE_READY_CONTRACT_FIXED / CLIENTS_ARE_TRANSPORT_TRUTH
-     * READY eligibility uses Colyseus' actual connected transports.
-     */
-    const connectedSessionIds =
+    const humanConnectedSessionIds =
       this.clients
-        .map(
-          (connectedClient) =>
-            connectedClient.sessionId,
-        )
+        .map((connectedClient) => connectedClient.sessionId)
         .filter(
           (sessionId) =>
             this.state.players.has(sessionId) &&
@@ -8440,58 +9080,44 @@ this.sendPaintReadyState(client);
             !this.supersededSessionIds.has(sessionId),
         );
 
-    const connectedSet =
-      new Set(connectedSessionIds);
-
-    for (const sessionId of connectedSet) {
+    /* Repair only REAL transport bookkeeping; bots never enter liveSessionIds. */
+    for (const sessionId of humanConnectedSessionIds) {
       this.liveSessionIds.add(sessionId);
     }
 
-    const eligibleReadyIds =
-      connectedSessionIds.filter(
-        (sessionId) =>
-          sessionId !== this.state.hostId,
-      );
+    const botIds = [...this.botSessionIds]
+      .filter((sessionId) => this.state.players.has(sessionId));
+    const connectedSessionIds = [
+      ...humanConnectedSessionIds,
+      ...botIds,
+    ];
+    const connectedSet = new Set(connectedSessionIds);
 
-    const eligibleSet =
-      new Set(eligibleReadyIds);
+    const eligibleReadyIds = connectedSessionIds.filter(
+      (sessionId) => sessionId !== this.state.hostId,
+    );
+    const eligibleSet = new Set(eligibleReadyIds);
 
     for (const sessionId of [...this.lobbyReadySessionIds]) {
-      if (!eligibleSet.has(sessionId)) {
-        this.lobbyReadySessionIds.delete(
-          sessionId,
-        );
-      }
+      if (!eligibleSet.has(sessionId)) this.lobbyReadySessionIds.delete(sessionId);
     }
 
-    const readySessionIds =
-      eligibleReadyIds.filter(
-        (sessionId) =>
-          this.lobbyReadySessionIds.has(
-            sessionId,
-          ),
-      );
+    const readySessionIds = eligibleReadyIds.filter(
+      (sessionId) =>
+        this.botSessionIds.has(sessionId) ||
+        this.lobbyReadySessionIds.has(sessionId),
+    );
+    const readyCount = readySessionIds.length;
+    const totalCount = eligibleReadyIds.length;
+    const livePlayerCount = connectedSessionIds.length;
 
-    const readyCount =
-      readySessionIds.length;
-
-    const totalCount =
-      eligibleReadyIds.length;
-
-    const livePlayerCount =
-      connectedSessionIds.length;
-
-    const hasDisconnectedPlayers =
-      [...this.state.players.keys()]
-        .some(
-          (sessionId) =>
-            !connectedSet.has(sessionId) &&
-            !this.supersededSessionIds.has(sessionId),
-        );
-
-    const allReady =
-      totalCount > 0 &&
-      readyCount === totalCount;
+    const hasDisconnectedPlayers = [...this.state.players.keys()].some(
+      (sessionId) =>
+        !connectedSet.has(sessionId) &&
+        !this.botSessionIds.has(sessionId) &&
+        !this.supersededSessionIds.has(sessionId),
+    );
+    const allReady = totalCount > 0 && readyCount === totalCount;
 
     return {
       readySessionIds,
@@ -8531,60 +9157,35 @@ this.sendPaintReadyState(client);
     allHidersReady: boolean;
     readySessionIds: string[];
   } {
-    const activeHiderIds =
-      [...this.state.players.entries()]
-        .filter(
-          ([sessionId, player]) =>
-            player.role === "hider" &&
-            player.alive &&
-            this.liveSessionIds.has(
-              sessionId,
-            ) &&
-            !this.supersededSessionIds.has(
-              sessionId,
-            ),
-        )
-        .map(
-          ([sessionId]) =>
-            sessionId,
-        );
+    const activeHiderIds = [...this.state.players.entries()]
+      .filter(
+        ([sessionId, player]) =>
+          player.role === "hider" &&
+          player.alive &&
+          (
+            this.liveSessionIds.has(sessionId) ||
+            this.botSessionIds.has(sessionId)
+          ) &&
+          !this.supersededSessionIds.has(sessionId),
+      )
+      .map(([sessionId]) => sessionId);
 
-    const activeHiderSet =
-      new Set(activeHiderIds);
-
-    for (
-      const sessionId of
-      [...this.paintReadySessionIds]
-    ) {
-      if (!activeHiderSet.has(sessionId)) {
-        this.paintReadySessionIds.delete(
-          sessionId,
-        );
-      }
+    const activeHiderSet = new Set(activeHiderIds);
+    for (const sessionId of [...this.paintReadySessionIds]) {
+      if (!activeHiderSet.has(sessionId)) this.paintReadySessionIds.delete(sessionId);
     }
 
-    const readySessionIds =
-      activeHiderIds.filter(
-        (sessionId) =>
-          this.paintReadySessionIds.has(
-            sessionId,
-          ),
-      );
-
-    const ready =
-      readySessionIds.length;
-
-    const total =
-      activeHiderIds.length;
-
+    const readySessionIds = activeHiderIds.filter(
+      (sessionId) => this.paintReadySessionIds.has(sessionId),
+    );
+    const ready = readySessionIds.length;
+    const total = activeHiderIds.length;
     return {
       ready,
       total,
       readyCount: ready,
       hiderCount: total,
-      allHidersReady:
-        total > 0 &&
-        ready === total,
+      allHidersReady: total > 0 && ready === total,
       readySessionIds,
     };
   }
@@ -8860,6 +9461,9 @@ this.sendPaintReadyState(client);
 
     this.liveSessionIds.clear();
     this.supersededSessionIds.clear();
+    this.botSessionIds.clear();
+    this.botBrainBySessionId.clear();
+    this.lastMoveAtBySessionId.clear();
 
     console.log(
       "[Color Hunt] room disposed",
@@ -8878,7 +9482,8 @@ this.sendPaintReadyState(client);
       isPrivate:
         this.state.isPrivate,
       playerCount:
-        this.liveSessionIds.size,
+        this.liveSessionIds.size +
+        this.botSessionIds.size,
       maxClients:
         this.maxClients,
       phase:

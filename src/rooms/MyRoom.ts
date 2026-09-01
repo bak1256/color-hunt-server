@@ -1,3 +1,4 @@
+/* V1010565P_POST_ROUND_VIRTUAL_BOT_LOBBY_RESET: physical bots are dematerialized once on round->Lobby; configured Lobby bot seats stay virtual. */
 /* V1010564_REMOVE_FART_RAMPAGE_TEST_ONLY_SERVER: remove temporary direct Fart Rampage test endpoint; production Random Taunt remains. */
 /* V1010563_FART_RAMPAGE_HYPER_BOUNCE_REPEAT_TEST_SERVER: faster/wider sprint, mirrored wall bounce, 30Hz authority, repeated TEST restart. */
 /* V1010562D_FART_RAMPAGE_WIDE_SMOOTH_DASH_SERVER: wider asymmetric figure-eight, ~1.3x old travel speed, 60ms authority, 4s origin-cover return. */
@@ -9703,6 +9704,24 @@ this.sendPaintReadyState(client);
     this.chatLastNormalized.clear();
 
     this.state.phase = "lobby";
+
+    /*
+     * V1010565P_POST_ROUND_VIRTUAL_BOT_LOBBY_RESET
+     *
+     * v565b intentionally made Lobby +/- virtual so clicking +/- never churns
+     * Colyseus MapSchema PlayerState. Physical bot actors are needed only while
+     * a round is active.
+     *
+     * Before this fix, resetToLobby() preserved the previous round's physical
+     * bots. Therefore round 2+ could lower configuredBotCount, but those old
+     * PlayerStates stayed visible until the NEXT start_game call finally ran
+     * setBotCount(configuredBotCount).
+     *
+     * Dematerialize physical bots ONCE at Finished -> Lobby. Do NOT touch
+     * configuredBotCount: the same desired count immediately becomes virtual
+     * Lobby seats/previews, and the next START materializes exactly that count.
+     */
+    this.setBotCount(0);
 
     this.sniperActiveHunters.clear();
     this.hardenedHiderEndsAt.clear();
